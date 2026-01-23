@@ -280,8 +280,10 @@ class Runner {
             if pymobiledevicePath == nil {
                 showAlert("""
                 pymobiledevice3 not found. Searched the following locations:
+                • System PATH (using 'which' command)
                 • /opt/homebrew/bin/
                 • /usr/local/bin/
+                • /Applications/anaconda3/bin/
                 • ~/.local/bin/
                 • ~/Library/Python/*/bin/
 
@@ -311,21 +313,46 @@ class Runner {
     private func findPymobiledevice3Path() -> String? {
         let fileManager = FileManager.default
 
-        // Check common paths by priority
+        // Strategy 1: Use 'which' to find pymobiledevice3 in PATH (fastest and most reliable)
+        let whichTask = Process()
+        whichTask.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        whichTask.arguments = ["pymobiledevice3"]
+
+        let whichPipe = Pipe()
+        whichTask.standardOutput = whichPipe
+        whichTask.standardError = Pipe() // Suppress errors
+
+        do {
+            try whichTask.run()
+            whichTask.waitUntilExit()
+
+            if whichTask.terminationStatus == 0 {
+                let data = whichPipe.fileHandleForReading.readDataToEndOfFile()
+                let pathString = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if !pathString.isEmpty && fileManager.fileExists(atPath: pathString) {
+                    return pathString
+                }
+            }
+        } catch {
+            // Fall through to manual search
+        }
+
+        // Strategy 2: Check common installation paths
         let commonPaths = [
-            "/opt/homebrew/bin/pymobiledevice3",           // ARM64 homebrew
-            "/usr/local/bin/pymobiledevice3",              // Intel homebrew
-            "\(NSHomeDirectory())/.local/bin/pymobiledevice3"  // pip user local
+            "/opt/homebrew/bin/pymobiledevice3",              // ARM64 homebrew
+            "/usr/local/bin/pymobiledevice3",                 // Intel homebrew
+            "/Applications/anaconda3/bin/pymobiledevice3",    // Anaconda
+            "\(NSHomeDirectory())/.local/bin/pymobiledevice3" // pip user local
         ]
 
-        // First check static paths (fast)
         for path in commonPaths {
             if fileManager.fileExists(atPath: path) {
                 return path
             }
         }
 
-        // Fallback: search ~/Library/Python/*/bin/pymobiledevice3
+        // Strategy 3: Search ~/Library/Python/*/bin/pymobiledevice3
         let libraryPath = "\(NSHomeDirectory())/Library/Python"
 
         guard fileManager.fileExists(atPath: libraryPath) else {
