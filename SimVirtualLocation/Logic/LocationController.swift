@@ -24,6 +24,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     enum PointsMode: Int, Identifiable {
         case single
         case two
+        case direction
 
         var id: Int { self.rawValue }
     }
@@ -68,6 +69,20 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     @Published var logs: [LogEntry] = []
 
+    // MARK: - Direction Mode
+
+    @Published var waypoints: [MKPointAnnotation] = []
+
+    var directionHintText: String {
+        if waypoints.count >= 2 {
+            return "Route with \(waypoints.count) points. Click 'Start Simulation' to begin."
+        } else if waypoints.count == 1 {
+            return "Add at least one more waypoint to create a route"
+        } else {
+            return "Click map to add waypoints"
+        }
+    }
+
     let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .iso8601)
@@ -92,12 +107,13 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     private var annotations: [MKAnnotation] = []
     private var route: MKRoute?
-    
+    private var directionRoutes: [MKRoute] = []  // For Direction mode multi-segment routes
+
     private var tracks: [Track] = []
     private var currentTrackIndex: Int = 0
     private var lastTrackLocation: CLLocationCoordinate2D?
     private var tracksTimes: [Track: Double] = [:]
-    
+
     private var timer: Timer?
 
     @Published var savedLocations: [Location] = []
@@ -120,6 +136,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
         mapView.mkMapView.delegate = self
         mapView.viewHolder.clickAction = handleMapClick
+        mapView.viewHolder.doubleClickAction = handleMapDoubleClick
 
         Task { @MainActor in
             await refreshDevices()
@@ -696,6 +713,24 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func handlePointsModeChange() {
+        // Switching away from Direction mode
+        if pointsMode != .direction && !waypoints.isEmpty {
+            clearAllWaypoints()
+        }
+
+        // Switching to Direction mode
+        if pointsMode == .direction {
+            // Clear existing annotations from Single/Two mode
+            if !annotations.isEmpty {
+                mapView.mkMapView.removeAnnotations(annotations)
+                annotations = []
+            }
+            if let route = route {
+                mapView.mkMapView.removeOverlay(route.polyline)
+            }
+        }
+
+        // Original Single mode logic
         if pointsMode == .single && annotations.count == 2, let second = annotations.last {
             mapView.mkMapView.removeAnnotation(second)
 
@@ -712,10 +747,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         handleSet(point: point)
     }
 
+    private func handleMapDoubleClick(_ sender: NSClickGestureRecognizer) {
+        // Double click disabled for Direction mode - using single click only
+    }
+
     private func handleSet(point: CGPoint) {
         let clickLocation = mapView.mkMapView.convert(point, toCoordinateFrom: mapView.mkMapView)
 
-        addLocation(coordinate: clickLocation)
+        if pointsMode == .direction {
+            addWaypoint(coordinate: clickLocation)
+        } else {
+            addLocation(coordinate: clickLocation)
+        }
     }
 
     private func addLocation(coordinate: CLLocationCoordinate2D) {
@@ -838,6 +881,187 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     private func log(_ message: String) {
         logs.insert(LogEntry(date: Date(), message: message), at: 0)
     }
+    // MARK: - Direction Mode Methods
+
+    func addWaypoint(coordinate: CLLocationCoordinate2D) {
+        guard pointsMode == .direction else { return }
+
+        let annotation = MKPointAnnotation()
+        annotation.coordinate = coordinate
+        annotation.title = "\(waypoints.count + 1)"
+
+        waypoints.append(annotation)
+        mapView.mkMapView.addAnnotation(annotation)
+
+        log("Added waypoint \(waypoints.count): \(coordinate.latitude), \(coordinate.longitude)")
+
+        // Auto-generate route if we have 2 or more waypoints
+        if waypoints.count >= 2 {
+            autoGenerateRoute()
+        }
+    }
+
+    func deleteWaypoint(at index: Int) {
+        guard index < waypoints.count else { return }
+
+        let waypoint = waypoints[index]
+        mapView.mkMapView.removeAnnotation(waypoint)
+        waypoints.remove(at: index)
+
+        // Renumber remaining waypoints
+        for (idx, point) in waypoints.enumerated() {
+            point.title = "\(idx + 1)"
+        }
+
+        log("Deleted waypoint \(index + 1)")
+
+        // Clear route overlays
+        clearRouteOverlays()
+
+        // Regenerate route if we still have 2+ points
+        if waypoints.count >= 2 {
+            autoGenerateRoute()
+        }
+    }
+
+    func moveWaypoint(from source: IndexSet, to destination: Int) {
+        waypoints.move(fromOffsets: source, toOffset: destination)
+
+        // Renumber all waypoints
+        for (idx, point) in waypoints.enumerated() {
+            point.title = "\(idx + 1)"
+        }
+
+        log("Reordered waypoints")
+
+        // Clear and regenerate route
+        clearRouteOverlays()
+        if waypoints.count >= 2 {
+            autoGenerateRoute()
+        }
+    }
+
+    func clearAllWaypoints() {
+        mapView.mkMapView.removeAnnotations(waypoints)
+        waypoints = []
+        clearRouteOverlays()
+        log("Cleared all waypoints")
+    }
+
+    private func autoGenerateRoute() {
+        guard waypoints.count >= 2 else { return }
+
+        // Clear existing route overlays
+        clearRouteOverlays()
+
+        // Calculate routes between each pair of consecutive waypoints
+        var allRoutes: [MKRoute] = []
+        let group = DispatchGroup()
+
+        for i in 0..<(waypoints.count - 1) {
+            group.enter()
+
+            let start = MKPlacemark(coordinate: waypoints[i].coordinate)
+            let end = MKPlacemark(coordinate: waypoints[i + 1].coordinate)
+
+            let request = MKDirections.Request()
+            request.source = MKMapItem(placemark: start)
+            request.destination = MKMapItem(placemark: end)
+            request.transportType = .automobile
+
+            let directions = MKDirections(request: request)
+            directions.calculate { [weak self] response, error in
+                defer { group.leave() }
+
+                if let route = response?.routes.first {
+                    allRoutes.append(route)
+                } else if let error = error {
+                    self?.log("Route segment \(i+1)→\(i+2) error: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+
+            // Save routes for simulation
+            self.directionRoutes = allRoutes
+
+            // Add all route segments to map
+            for route in allRoutes {
+                self.mapView.mkMapView.addOverlay(route.polyline, level: .aboveRoads)
+            }
+
+            // Calculate total distance
+            let totalDistance = allRoutes.reduce(0.0) { $0 + $1.distance }
+            self.log("Route generated: \(String(format: "%.1f", totalDistance / 1000)) km")
+
+            // Adjust map to show all waypoints
+            if !self.waypoints.isEmpty {
+                self.mapView.mkMapView.showAnnotations(self.waypoints, animated: true)
+            }
+        }
+    }
+
+    private func clearRouteOverlays() {
+        let overlays = mapView.mkMapView.overlays
+        mapView.mkMapView.removeOverlays(overlays)
+        directionRoutes = []
+    }
+
+    func simulateDirectionRoute() {
+        guard waypoints.count >= 2 else {
+            showAlert("Need at least 2 waypoints to start simulation")
+            return
+        }
+
+        guard !directionRoutes.isEmpty else {
+            showAlert("Route not ready. Please wait for route generation to complete.")
+            return
+        }
+
+        // Build tracks from all route segments
+        tracks = []
+        tracksTimes = [:]
+
+        for route in directionRoutes {
+            let buffer = UnsafeBufferPointer(start: route.polyline.points(), count: route.polyline.pointCount)
+
+            for i in 0..<route.polyline.pointCount {
+                let trackStartPoint = buffer[i]
+                var trackEndPoint: MKMapPoint?
+                if i + 1 < route.polyline.pointCount {
+                    trackEndPoint = buffer[i+1]
+                }
+
+                if let trackEndPoint = trackEndPoint {
+                    let track = Track(startPoint: trackStartPoint, endPoint: trackEndPoint)
+                    tracks.append(track)
+                }
+            }
+        }
+
+        if tracks.isEmpty {
+            showAlert("No route for simulation")
+            return
+        }
+
+        // Start simulation
+        currentTrackIndex = 0
+        lastTrackLocation = nil
+        isSimulating = true
+
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+        currentSimulationAnnotation.coordinate = tracks[0].startPoint.coordinate
+        currentSimulationAnnotation.title = "Current location"
+        mapView.mkMapView.addAnnotation(currentSimulationAnnotation)
+
+        timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
+            self.performMovement()
+        }
+
+        log("Started Direction mode simulation with \(tracks.count) track segments")
+    }
 }
 
 private extension LocationController {
@@ -904,6 +1128,7 @@ private extension LocationController {
 
         return [Simulator.empty()] + bootedSimulators
     }
+
 
     enum SimulatorFetchError: Error, CustomStringConvertible {
         case simctlFailed
