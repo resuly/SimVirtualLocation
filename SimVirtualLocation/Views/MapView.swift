@@ -36,7 +36,7 @@ class MapViewHolder {
             target: self,
             action: #selector(self.handleClickGesture(_:)))
         clickGesture.numberOfClicksRequired = 1
-        clickGesture.delaysPrimaryMouseButtonEvents = false
+        clickGesture.delaysPrimaryMouseButtonEvents = true  // Allow drag gestures to take priority
 
         // Double click gesture
         let doubleClickGesture = NSClickGestureRecognizer(

@@ -14,8 +14,6 @@ struct LocationsView: View {
     @State private var renameAlertShowing = false
     @State private var updatedName = ""
     @State private var selectedLocation = Location(name: "", latitude: .zero, longitude: .zero)
-    @State private var isExporting = false
-    @State private var isImporting = false
 
     var body: some View {
         VStack {
@@ -58,49 +56,7 @@ struct LocationsView: View {
                     renameAlertShowing.toggle()
                 }
             }
-
-            HStack {
-                Button("Export") {
-                    isExporting.toggle()
-                }
-                .fileExporter(
-                    isPresented: $isExporting,
-                    document: LocationsFileDocument(locations: locationController.savedLocations),
-                    contentType: .json,
-                    defaultFilename: "SimVirtualLocations"
-                ) { result in
-                        locationController.showAlert("Success")
-                    }
-                Button("Import") {
-                    isImporting.toggle()
-                }.fileImporter(
-                    isPresented: $isImporting,
-                    allowedContentTypes: [.json]
-                ) { result in
-                    let fileResult = result.flatMap { url in
-                        read(from: url)
-                    }
-
-                    switch fileResult {
-                    case .success(let data):
-                        locationController.importLocations(from: data)
-
-                    case .failure(let error):
-                        locationController.showAlert(error.localizedDescription)
-                    }
-                }
-            }
         }
-    }
-
-    private func read(from url: URL) -> Result<Data, Error> {
-        let _ = url.startAccessingSecurityScopedResource()
-
-        let result = Result { try Data(contentsOf: url) }
-
-        url.stopAccessingSecurityScopedResource()
-
-        return result
     }
 }
 

@@ -70,14 +70,9 @@ struct ContentView: View {
                     }
 
                 }.frame(width: 250)
-                    .padding(EdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 0))
-
-                LocationsView()
-                    .environmentObject(locationController)
-                    .frame(width: 300)
                     .padding(EdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 16))
 
-            }.frame(minWidth: 1100, minHeight: 500)
+            }.frame(minWidth: 800, minHeight: 500)
                 .onAppear {
                     locationController.updateMapRegion()
                 }

@@ -106,25 +106,50 @@ struct LocationSettingsPanel: View {
                         Text("Simulate from A to B").frame(maxWidth: .infinity)
                     })
 
-                    Button(action: {
-                        locationController.stopSimulation()
-                    }, label: {
-                        Text("Stop simulation").frame(maxWidth: .infinity)
-                    })
-                }
+                    // Simulation controls with Pause/Resume
+                    HStack {
+                        if locationController.isSimulating {
+                            Button(action: {
+                                if locationController.isPaused {
+                                    locationController.resumeSimulation()
+                                } else {
+                                    locationController.pauseSimulation()
+                                }
+                            }, label: {
+                                Text(locationController.isPaused ? "Resume" : "Pause")
+                                    .frame(maxWidth: .infinity)
+                            })
 
-                GroupBox {
-                    VStack(alignment: .leading) {
-                        Slider(value: $locationController.speed, in: 5...200, step: 5) {
-                            Text("Speed")
+                            Button(action: {
+                                locationController.stopSimulation()
+                            }, label: {
+                                Text("Stop")
+                                    .frame(maxWidth: .infinity)
+                            })
+                        } else {
+                            Button(action: {
+                                locationController.stopSimulation()
+                            }, label: {
+                                Text("Stop simulation").frame(maxWidth: .infinity)
+                            })
                         }
-                        Text("\(Int(locationController.speed.rounded(.up))) km/h")
                     }
                 }
 
                 GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Speed")
+                            .font(.headline)
+                        Slider(value: $locationController.speed, in: 0...200, step: 5)
+                        Text("\(Int(locationController.speed.rounded(.up))) km/h")
+                            .font(.subheadline)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                GroupBox {
                     if locationController.useRSD {
-                        Picker("Location update frequency", selection: $locationController.timeScale) {
+                        Picker("Frequency", selection: $locationController.timeScale) {
                             Text("5s").tag(5.0)
                             Text("10s").tag(10.0)
                             Text("15s").tag(15.0)
@@ -135,7 +160,8 @@ struct LocationSettingsPanel: View {
                             locationController.timeScale = 5.0
                         }
                     } else {
-                        Picker("Location update frequency", selection: $locationController.timeScale) {
+                        Picker("Frequency", selection: $locationController.timeScale) {
+                            Text("0.5s").tag(0.5)
                             Text("1s").tag(1.0)
                             Text("1.5s").tag(1.5)
                             Text("2s").tag(2.0)
@@ -226,18 +252,20 @@ struct DirectionPanel: View {
 
             // Speed control
             GroupBox {
-                VStack(alignment: .leading) {
-                    Slider(value: $locationController.speed, in: 5...200, step: 5) {
-                        Text("Speed")
-                    }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Speed")
+                        .font(.headline)
+                    Slider(value: $locationController.speed, in: 0...200, step: 5)
                     Text("\(Int(locationController.speed.rounded(.up))) km/h")
+                        .font(.subheadline)
                 }
+                .padding(.vertical, 4)
             }
 
-            // Location update frequency
+            // Frequency
             GroupBox {
                 if locationController.useRSD {
-                    Picker("Location update frequency", selection: $locationController.timeScale) {
+                    Picker("Frequency", selection: $locationController.timeScale) {
                         Text("5s").tag(5.0)
                         Text("10s").tag(10.0)
                         Text("15s").tag(15.0)
@@ -248,7 +276,8 @@ struct DirectionPanel: View {
                         locationController.timeScale = 5.0
                     }
                 } else {
-                    Picker("Location update frequency", selection: $locationController.timeScale) {
+                    Picker("Frequency", selection: $locationController.timeScale) {
+                        Text("0.5s").tag(0.5)
                         Text("1s").tag(1.0)
                         Text("1.5s").tag(1.5)
                         Text("2s").tag(2.0)
@@ -259,17 +288,38 @@ struct DirectionPanel: View {
             }
 
             // Simulation controls
-            Button(action: {
+            HStack {
                 if locationController.isSimulating {
-                    locationController.stopSimulation()
+                    // Pause/Resume button
+                    Button(action: {
+                        if locationController.isPaused {
+                            locationController.resumeSimulation()
+                        } else {
+                            locationController.pauseSimulation()
+                        }
+                    }, label: {
+                        Text(locationController.isPaused ? "Resume" : "Pause")
+                            .frame(maxWidth: .infinity)
+                    })
+
+                    // Stop button
+                    Button(action: {
+                        locationController.stopSimulation()
+                    }, label: {
+                        Text("Stop")
+                            .frame(maxWidth: .infinity)
+                    })
                 } else {
-                    locationController.simulateDirectionRoute()
+                    // Start button
+                    Button(action: {
+                        locationController.simulateDirectionRoute()
+                    }, label: {
+                        Text("Start Simulation")
+                            .frame(maxWidth: .infinity)
+                    })
+                    .disabled(locationController.waypoints.count < 2)
                 }
-            }, label: {
-                Text(locationController.isSimulating ? "Stop Simulation" : "Start Simulation")
-                    .frame(maxWidth: .infinity)
-            })
-            .disabled(locationController.waypoints.count < 2)
+            }
 
             Spacer()
         }

@@ -36,8 +36,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     // MARK: - Publishers
 
     @Published var isSimulating = false
+    @Published var isPaused = false
     @Published var speed: Double = 60.0
-    @Published var pointsMode: PointsMode = .single {
+    @Published var pointsMode: PointsMode = .direction {
         didSet { handlePointsModeChange() }
     }
     @Published var deviceMode: DeviceMode = .simulator
@@ -359,9 +360,32 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         )
     }
 
+    func pauseSimulation() {
+        guard isSimulating && !isPaused else { return }
+        isPaused = true
+        timer?.invalidate()
+        timer = nil
+        log("Simulation paused")
+    }
+
+    func resumeSimulation() {
+        guard isSimulating && isPaused else { return }
+        isPaused = false
+
+        // Restart timer
+        timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
+            self.performMovement()
+        }
+        log("Simulation resumed")
+    }
+
     func stopSimulation() {
         isSimulating = false
+        isPaused = false
+        timer?.invalidate()
+        timer = nil
         runner.stop()
+        log("Simulation stopped")
     }
 
     func reset() {
@@ -379,14 +403,54 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
         if annotation === currentSimulationAnnotation {
-            let marker = MKMarkerAnnotationView(
-                annotation: currentSimulationAnnotation,
+            let marker = mapView.dequeueReusableAnnotationView(
+                withIdentifier: "simulationMarker"
+            ) as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(
+                annotation: annotation,
                 reuseIdentifier: "simulationMarker"
             )
+            marker.annotation = annotation
             marker.markerTintColor = .orange
+            marker.isDraggable = false
             return marker
         }
+
+        // Check if annotation is a waypoint
+        if waypoints.contains(where: { $0 === annotation }) {
+            let marker = mapView.dequeueReusableAnnotationView(
+                withIdentifier: "waypointMarker"
+            ) as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(
+                annotation: annotation,
+                reuseIdentifier: "waypointMarker"
+            )
+            marker.annotation = annotation
+            marker.markerTintColor = .red
+            marker.isDraggable = true
+            marker.dragState = .none
+            return marker
+        }
+
         return nil
+    }
+
+    // Handle waypoint drag events
+    func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, didChange newState: MKAnnotationView.DragState, fromOldState oldState: MKAnnotationView.DragState) {
+        guard let annotation = view.annotation as? MKPointAnnotation else { return }
+        guard waypoints.contains(where: { $0 === annotation }) else { return }
+
+        // When drag ends, update the waypoint and regenerate route
+        if newState == .ending {
+            // Find the waypoint index
+            if let index = waypoints.firstIndex(where: { $0 === annotation }) {
+                // Update waypoint coordinate
+                waypoints[index].coordinate = annotation.coordinate
+
+                // Regenerate route if we have at least 2 waypoints
+                if waypoints.count >= 2 {
+                    autoGenerateRoute()
+                }
+            }
+        }
     }
 
     // MARK: - CLLocationManagerDelegate
@@ -631,8 +695,12 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func performMovement() {
-        guard self.isSimulating, self.tracks.count > 0, self.currentTrackIndex < self.tracks.count else {
+        guard self.isSimulating, !self.isPaused, self.tracks.count > 0, self.currentTrackIndex < self.tracks.count else {
+            if self.isPaused {
+                return // Keep paused state
+            }
             self.isSimulating = false
+            self.isPaused = false
             self.timer?.invalidate()
             self.timer = nil
             self.currentTrackIndex = 0
@@ -744,6 +812,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     private func handleMapClick(_ sender: NSClickGestureRecognizer) {
         let point = sender.location(in: mapView.mkMapView)
+
+        // In Direction mode, check if clicking on an existing waypoint (for dragging)
+        if pointsMode == .direction {
+            let view = mapView.mkMapView.hitTest(point)
+            if let annotationView = view as? MKAnnotationView,
+               let annotation = annotationView.annotation as? MKPointAnnotation,
+               waypoints.contains(where: { $0 === annotation }) {
+                // Clicking on a waypoint - let the drag gesture handle it
+                return
+            }
+        }
+
         handleSet(point: point)
     }
 
