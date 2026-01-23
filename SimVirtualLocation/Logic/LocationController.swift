@@ -110,6 +110,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     private var route: MKRoute?
     private var directionRoutes: [MKRoute] = []  // For Direction mode multi-segment routes
 
+    // Store all alternate routes for debugging and future route selection
+    private var alternateRoutes: [MKRoute] = []  // For Two Points mode
+
     private var tracks: [Track] = []
     private var currentTrackIndex: Int = 0
     private var lastTrackLocation: CLLocationCoordinate2D?
@@ -222,6 +225,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         directionRequest.destination = destinationMapItem
         directionRequest.transportType = .automobile
 
+        // Request alternate routes to get more options
+        directionRequest.requestsAlternateRoutes = true
+
+        // Use current time for accurate traffic-based ETA
+        directionRequest.departureDate = Date()
+
+        // iOS 16+: Route preferences
+        if #available(macOS 13.0, *) {
+            directionRequest.tollPreference = .any      // Allow toll roads
+            directionRequest.highwayPreference = .any   // Allow highways
+        }
+
         let directions = MKDirections(request: directionRequest)
 
         directions.calculate { (response, error) -> Void in
@@ -232,6 +247,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
                 return
             }
 
+            // Store all alternate routes for debugging
+            self.alternateRoutes = response.routes
+
+            // Log number of routes returned
+            self.log("Received \(response.routes.count) route(s) from Apple Maps")
+            if response.routes.count > 1 {
+                for (idx, route) in response.routes.enumerated() {
+                    self.log("  Route \(idx+1): \(String(format: "%.2f", route.distance/1000))km, \(String(format: "%.1f", route.expectedTravelTime/60))min")
+                }
+            }
+
+            // Use the first route (typically the fastest)
             let route = response.routes[0]
 
             if let currentRoute = self.route {
@@ -425,8 +452,15 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             )
             marker.annotation = annotation
             marker.markerTintColor = .red
-            marker.isDraggable = true
+            marker.isDraggable = !isSimulating  // Disable drag during simulation
+            marker.canShowCallout = false  // Disable callout to prevent interference
             marker.dragState = .none
+
+            // Find the waypoint index for the title
+            if let index = waypoints.firstIndex(where: { $0 === annotation }) {
+                marker.glyphText = "\(index + 1)"
+            }
+
             return marker
         }
 
@@ -436,20 +470,38 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     // Handle waypoint drag events
     func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, didChange newState: MKAnnotationView.DragState, fromOldState oldState: MKAnnotationView.DragState) {
         guard let annotation = view.annotation as? MKPointAnnotation else { return }
-        guard waypoints.contains(where: { $0 === annotation }) else { return }
+        guard let index = waypoints.firstIndex(where: { $0 === annotation }) else { return }
 
-        // When drag ends, update the waypoint and regenerate route
-        if newState == .ending {
-            // Find the waypoint index
-            if let index = waypoints.firstIndex(where: { $0 === annotation }) {
-                // Update waypoint coordinate
-                waypoints[index].coordinate = annotation.coordinate
+        switch newState {
+        case .starting:
+            log("Started dragging waypoint \(index + 1)")
+
+        case .dragging:
+            // Update coordinate during drag
+            waypoints[index].coordinate = annotation.coordinate
+
+        case .ending, .canceling:
+            // Update final coordinate
+            waypoints[index].coordinate = annotation.coordinate
+            log("Moved waypoint \(index + 1) to: \(annotation.coordinate.latitude), \(annotation.coordinate.longitude)")
+
+            // Force UI update by reassigning the array
+            let updatedWaypoints = waypoints
+            waypoints = []
+            DispatchQueue.main.async {
+                self.waypoints = updatedWaypoints
 
                 // Regenerate route if we have at least 2 waypoints
-                if waypoints.count >= 2 {
-                    autoGenerateRoute()
+                if self.waypoints.count >= 2 {
+                    self.autoGenerateRoute()
                 }
             }
+
+        case .none:
+            break
+
+        @unknown default:
+            break
         }
     }
 
@@ -939,9 +991,15 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         mapView.mkMapView.removeAnnotations(mapView.mkMapView.annotations)
         annotations = []
 
+        // Clear waypoints and direction routes
+        waypoints = []
+        directionRoutes = []
+
         if let route = route {
             mapView.mkMapView.removeOverlay(route.polyline)
         }
+
+        clearRouteOverlays()
 
         if deviceType == 0 {
             runner.resetIos(showAlert: showAlert)
@@ -1049,12 +1107,28 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             request.destination = MKMapItem(placemark: end)
             request.transportType = .automobile
 
+            // Request alternate routes for better options
+            request.requestsAlternateRoutes = true
+
+            // Use current time for accurate ETA
+            request.departureDate = Date()
+
+            // iOS 16+: Route preferences
+            if #available(macOS 13.0, *) {
+                request.tollPreference = .any
+                request.highwayPreference = .any
+            }
+
             let directions = MKDirections(request: request)
             directions.calculate { [weak self] response, error in
                 defer { group.leave() }
 
                 if let route = response?.routes.first {
                     allRoutes.append(route)
+                    // Log alternate routes if available
+                    if let routeCount = response?.routes.count, routeCount > 1 {
+                        self?.log("Segment \(i+1): \(routeCount) route options available")
+                    }
                 } else if let error = error {
                     self?.log("Route segment \(i+1)→\(i+2) error: \(error.localizedDescription)")
                 }
@@ -1210,6 +1284,365 @@ private extension LocationController {
     }
 
 
+    // MARK: - Debug Methods
+
+    public func getRouteDebugData() -> RouteDebugData {
+        var summary = ""
+        var details = ""
+        var steps = ""
+        var polyline = ""
+        var json = ""
+
+        if pointsMode == .direction {
+            // Summary
+            summary += "Mode: Direction (Multi-waypoint)\n"
+            summary += "Waypoints: \(waypoints.count)\n"
+            summary += "Route Segments: \(directionRoutes.count)\n"
+            summary += "Total Distance: \(String(format: "%.2f", directionRoutes.reduce(0) { $0 + $1.distance } / 1000)) km\n"
+            summary += "Total Expected Time: \(String(format: "%.1f", directionRoutes.reduce(0) { $0 + $1.expectedTravelTime } / 60)) min\n\n"
+
+            for (idx, waypoint) in waypoints.enumerated() {
+                summary += "Waypoint \(idx + 1): (\(waypoint.coordinate.latitude), \(waypoint.coordinate.longitude))\n"
+            }
+
+            // Details, steps, and polyline for each segment
+            for (idx, route) in directionRoutes.enumerated() {
+                details += "--- Segment \(idx + 1) ---\n"
+                details += formatRouteBasicInfo(route)
+                details += "\n\n"
+
+                steps += "--- Segment \(idx + 1) Steps ---\n"
+                steps += formatRouteSteps(route)
+                steps += "\n\n"
+
+                polyline += "--- Segment \(idx + 1) Polyline ---\n"
+                polyline += formatRoutePolyline(route, sampleCount: 5)
+                polyline += "\n\n"
+
+                json += formatRouteJSON(route, segmentIndex: idx + 1)
+            }
+
+        } else if pointsMode == .two, let currentRoute = route {
+            // Summary
+            summary += "Mode: Two Points (A to B)\n"
+            summary += "Alternate Routes: \(alternateRoutes.count)\n"
+            summary += "Currently Using: Route 1 (Primary)\n\n"
+
+            // Show summary of all alternate routes
+            if alternateRoutes.count > 1 {
+                summary += "Route Comparison:\n"
+                for (idx, route) in alternateRoutes.enumerated() {
+                    summary += "  Route \(idx+1): \(String(format: "%.2f", route.distance / 1000)) km, "
+                    summary += "\(String(format: "%.1f", route.expectedTravelTime / 60)) min"
+                    if #available(macOS 13.0, *) {
+                        if route.hasTolls { summary += " [Tolls]" }
+                        if route.hasHighways { summary += " [Highway]" }
+                    }
+                    summary += "\n"
+                }
+                summary += "\n"
+            }
+
+            summary += "Primary Route:\n"
+            summary += "  Distance: \(String(format: "%.2f", currentRoute.distance / 1000)) km\n"
+            summary += "  Time: \(String(format: "%.1f", currentRoute.expectedTravelTime / 60)) min\n"
+
+            // Details - show all routes
+            if alternateRoutes.count > 1 {
+                for (idx, route) in alternateRoutes.enumerated() {
+                    details += "═══ Route \(idx+1) ═══\n"
+                    details += formatRouteBasicInfo(route)
+                    details += "\n\n"
+                }
+            } else {
+                details = formatRouteBasicInfo(currentRoute)
+            }
+
+            // Steps - primary route only
+            steps = formatRouteSteps(currentRoute)
+
+            // Polyline - primary route only
+            polyline = formatRoutePolyline(currentRoute, sampleCount: 10)
+
+            // JSON - all routes
+            if alternateRoutes.count > 1 {
+                json = "[\n"
+                for (idx, route) in alternateRoutes.enumerated() {
+                    json += formatRouteJSON(route, segmentIndex: idx + 1)
+                    if idx < alternateRoutes.count - 1 {
+                        json += ",\n"
+                    }
+                }
+                json += "\n]"
+            } else {
+                json = formatRouteJSON(currentRoute, segmentIndex: nil)
+            }
+
+        } else {
+            summary = "Mode: Single Point (no route)\nNo route data available."
+        }
+
+        let fullText = getRouteDebugInfo()
+
+        return RouteDebugData(
+            summary: summary,
+            routeDetails: details,
+            navigationSteps: steps,
+            polylineData: polyline,
+            rawJSON: json,
+            fullText: fullText
+        )
+    }
+
+    private func formatRouteBasicInfo(_ route: MKRoute) -> String {
+        var info = ""
+        info += "Route Name: \(route.name.isEmpty ? "(unnamed)" : route.name)\n"
+        info += "Distance: \(String(format: "%.2f", route.distance / 1000)) km (\(String(format: "%.0f", route.distance)) m)\n"
+        info += "Expected Travel Time: \(String(format: "%.1f", route.expectedTravelTime / 60)) min (\(String(format: "%.0f", route.expectedTravelTime)) s)\n"
+        info += "Transport Type: \(transportTypeName(route.transportType)) (raw: \(route.transportType.rawValue))\n"
+
+        if #available(macOS 13.0, *) {
+            info += "Has Tolls: \(route.hasTolls ? "Yes" : "No")\n"
+            info += "Has Highways: \(route.hasHighways ? "Yes" : "No")\n"
+        }
+
+        if !route.advisoryNotices.isEmpty {
+            info += "\nAdvisory Notices (\(route.advisoryNotices.count)):\n"
+            for (idx, notice) in route.advisoryNotices.enumerated() {
+                info += "  \(idx + 1). \(notice)\n"
+            }
+        }
+
+        info += "\nPolyline Points: \(route.polyline.pointCount)\n"
+        let boundingRect = route.polyline.boundingMapRect
+        let topLeft = MKMapPoint(x: boundingRect.minX, y: boundingRect.minY).coordinate
+        let bottomRight = MKMapPoint(x: boundingRect.maxX, y: boundingRect.maxY).coordinate
+        info += "Bounding Box:\n"
+        info += "  Top-Left: (\(topLeft.latitude), \(topLeft.longitude))\n"
+        info += "  Bottom-Right: (\(bottomRight.latitude), \(bottomRight.longitude))\n"
+
+        return info
+    }
+
+    private func formatRouteSteps(_ route: MKRoute) -> String {
+        guard !route.steps.isEmpty else {
+            return "No navigation steps available"
+        }
+
+        var info = "Total Steps: \(route.steps.count)\n\n"
+        for (stepIdx, step) in route.steps.enumerated() {
+            info += "\(stepIdx + 1). "
+            info += step.instructions.isEmpty ? "(No instruction)" : step.instructions
+            info += "\n"
+            info += "   Distance: \(String(format: "%.0f", step.distance)) m\n"
+            info += "   Transport Type: \(transportTypeName(step.transportType))\n"
+            if let notice = step.notice, !notice.isEmpty {
+                info += "   Notice: \(notice)\n"
+            }
+            info += "   Polyline Points: \(step.polyline.pointCount)\n"
+            if stepIdx < route.steps.count - 1 {
+                info += "\n"
+            }
+        }
+        return info
+    }
+
+    private func formatRoutePolyline(_ route: MKRoute, sampleCount: Int) -> String {
+        guard route.polyline.pointCount > 0 else {
+            return "No polyline data available"
+        }
+
+        var info = "Total Points: \(route.polyline.pointCount)\n\n"
+        let buffer = UnsafeBufferPointer(start: route.polyline.points(), count: route.polyline.pointCount)
+        let count = min(sampleCount, route.polyline.pointCount)
+
+        info += "First \(count) points:\n"
+        for i in 0..<count {
+            let point = buffer[i]
+            let coord = point.coordinate
+            info += "[\(i)]: (\(coord.latitude), \(coord.longitude))\n"
+        }
+
+        if route.polyline.pointCount > count {
+            info += "\n... and \(route.polyline.pointCount - count) more points"
+        }
+
+        return info
+    }
+
+    private func formatRouteJSON(_ route: MKRoute, segmentIndex: Int?) -> String {
+        var json = "{\n"
+
+        if let idx = segmentIndex {
+            json += "  \"segment\": \(idx),\n"
+        }
+
+        json += "  \"name\": \"\(route.name)\",\n"
+        json += "  \"distance\": \(route.distance),\n"
+        json += "  \"expectedTravelTime\": \(route.expectedTravelTime),\n"
+        json += "  \"transportType\": \(route.transportType.rawValue),\n"
+
+        if #available(macOS 13.0, *) {
+            json += "  \"hasTolls\": \(route.hasTolls),\n"
+            json += "  \"hasHighways\": \(route.hasHighways),\n"
+        }
+
+        json += "  \"advisoryNotices\": [\n"
+        for (idx, notice) in route.advisoryNotices.enumerated() {
+            json += "    \"\(notice)\"\(idx < route.advisoryNotices.count - 1 ? "," : "")\n"
+        }
+        json += "  ],\n"
+
+        json += "  \"polyline\": {\n"
+        json += "    \"pointCount\": \(route.polyline.pointCount),\n"
+
+        let boundingRect = route.polyline.boundingMapRect
+        let topLeft = MKMapPoint(x: boundingRect.minX, y: boundingRect.minY).coordinate
+        let bottomRight = MKMapPoint(x: boundingRect.maxX, y: boundingRect.maxY).coordinate
+
+        json += "    \"boundingBox\": {\n"
+        json += "      \"topLeft\": { \"latitude\": \(topLeft.latitude), \"longitude\": \(topLeft.longitude) },\n"
+        json += "      \"bottomRight\": { \"latitude\": \(bottomRight.latitude), \"longitude\": \(bottomRight.longitude) }\n"
+        json += "    }\n"
+        json += "  },\n"
+
+        json += "  \"steps\": [\n"
+        for (idx, step) in route.steps.enumerated() {
+            json += "    {\n"
+            json += "      \"instructions\": \"\(step.instructions.replacingOccurrences(of: "\"", with: "\\\""))\",\n"
+            json += "      \"distance\": \(step.distance),\n"
+            json += "      \"transportType\": \(step.transportType.rawValue),\n"
+            if let notice = step.notice {
+                json += "      \"notice\": \"\(notice.replacingOccurrences(of: "\"", with: "\\\""))\",\n"
+            }
+            json += "      \"polylinePointCount\": \(step.polyline.pointCount)\n"
+            json += "    }\(idx < route.steps.count - 1 ? "," : "")\n"
+        }
+        json += "  ]\n"
+
+        json += "}\n"
+
+        return json
+    }
+
+    public func getRouteDebugInfo() -> String {
+        var info = "=== Apple Maps Route Debug Info ===\n\n"
+
+        if pointsMode == .direction {
+            info += "Mode: Direction (Multi-waypoint)\n"
+            info += "Waypoints: \(waypoints.count)\n\n"
+
+            for (idx, waypoint) in waypoints.enumerated() {
+                info += "Waypoint \(idx + 1): (\(waypoint.coordinate.latitude), \(waypoint.coordinate.longitude))\n"
+            }
+
+            info += "\nRoute Segments: \(directionRoutes.count)\n\n"
+
+            for (idx, route) in directionRoutes.enumerated() {
+                info += "--- Segment \(idx + 1) ---\n"
+                info += formatRouteDetails(route, detailed: true)
+                info += "\n"
+            }
+
+            info += "Total Distance: \(String(format: "%.2f", directionRoutes.reduce(0) { $0 + $1.distance } / 1000)) km\n"
+            info += "Total Expected Time: \(String(format: "%.1f", directionRoutes.reduce(0) { $0 + $1.expectedTravelTime } / 60)) min\n"
+
+        } else if pointsMode == .two, let currentRoute = route {
+            info += "Mode: Two Points (A to B)\n\n"
+            info += formatRouteDetails(currentRoute, detailed: true)
+        } else {
+            info += "Mode: Single Point (no route)\n"
+            info += "No route data available.\n"
+        }
+
+        return info
+    }
+
+    private func formatRouteDetails(_ route: MKRoute, detailed: Bool) -> String {
+        var info = ""
+
+        // Basic route information
+        info += "Route Name: \(route.name.isEmpty ? "(unnamed)" : route.name)\n"
+        info += "Distance: \(String(format: "%.2f", route.distance / 1000)) km (\(String(format: "%.0f", route.distance)) m)\n"
+        info += "Expected Travel Time: \(String(format: "%.1f", route.expectedTravelTime / 60)) min (\(String(format: "%.0f", route.expectedTravelTime)) s)\n"
+        info += "Transport Type: \(transportTypeName(route.transportType)) (raw: \(route.transportType.rawValue))\n"
+
+        // iOS 16+ properties
+        if #available(macOS 13.0, *) {
+            info += "Has Tolls: \(route.hasTolls ? "Yes" : "No")\n"
+            info += "Has Highways: \(route.hasHighways ? "Yes" : "No")\n"
+        }
+
+        // Advisory notices
+        if !route.advisoryNotices.isEmpty {
+            info += "\nAdvisory Notices (\(route.advisoryNotices.count)):\n"
+            for (idx, notice) in route.advisoryNotices.enumerated() {
+                info += "  \(idx + 1). \(notice)\n"
+            }
+        } else {
+            info += "Advisory Notices: None\n"
+        }
+
+        // Polyline information
+        info += "\nPolyline Points: \(route.polyline.pointCount)\n"
+        info += "Polyline Bounding Box:\n"
+        let boundingRect = route.polyline.boundingMapRect
+        let topLeft = MKMapPoint(x: boundingRect.minX, y: boundingRect.minY).coordinate
+        let bottomRight = MKMapPoint(x: boundingRect.maxX, y: boundingRect.maxY).coordinate
+        info += "  Top-Left: (\(topLeft.latitude), \(topLeft.longitude))\n"
+        info += "  Bottom-Right: (\(bottomRight.latitude), \(bottomRight.longitude))\n"
+
+        // Navigation steps with full details
+        if !route.steps.isEmpty {
+            info += "\nNavigation Steps (\(route.steps.count)):\n"
+            for (stepIdx, step) in route.steps.enumerated() {
+                info += "  \(stepIdx + 1). "
+                if step.instructions.isEmpty {
+                    info += "(No instruction)\n"
+                } else {
+                    info += "\(step.instructions)\n"
+                }
+                info += "     Distance: \(String(format: "%.0f", step.distance)) m\n"
+                info += "     Transport Type: \(transportTypeName(step.transportType))\n"
+                if let notice = step.notice, !notice.isEmpty {
+                    info += "     Notice: \(notice)\n"
+                }
+                info += "     Polyline Points: \(step.polyline.pointCount)\n"
+            }
+        } else {
+            info += "\nNavigation Steps: None\n"
+        }
+
+        // Polyline sample
+        if detailed {
+            let sampleCount = min(pointsMode == .direction ? 5 : 10, route.polyline.pointCount)
+            info += "\nPolyline Sample (first \(sampleCount) points):\n"
+            let buffer = UnsafeBufferPointer(start: route.polyline.points(), count: route.polyline.pointCount)
+            for i in 0..<sampleCount {
+                let point = buffer[i]
+                let coord = point.coordinate
+                info += "  [\(i)]: (\(coord.latitude), \(coord.longitude))\n"
+            }
+        }
+
+        return info
+    }
+
+    private func transportTypeName(_ type: MKDirectionsTransportType) -> String {
+        switch type {
+        case .automobile:
+            return "Automobile"
+        case .walking:
+            return "Walking"
+        case .transit:
+            return "Transit"
+        case .any:
+            return "Any"
+        default:
+            return "Unknown"
+        }
+    }
+
     enum SimulatorFetchError: Error, CustomStringConvertible {
         case simctlFailed
         case failedToReadOutput
@@ -1247,4 +1680,24 @@ private enum Constants {
 
     static let defaultsSavedLocationsPathKey = "saved_locations"
     static let defaultsXcodePathKey = "xcode_path"
+}
+
+// MARK: - Route Debug Data
+
+public struct RouteDebugData {
+    public let summary: String
+    public let routeDetails: String
+    public let navigationSteps: String
+    public let polylineData: String
+    public let rawJSON: String
+    public let fullText: String
+
+    public init(summary: String, routeDetails: String, navigationSteps: String, polylineData: String, rawJSON: String, fullText: String) {
+        self.summary = summary
+        self.routeDetails = routeDetails
+        self.navigationSteps = navigationSteps
+        self.polylineData = polylineData
+        self.rawJSON = rawJSON
+        self.fullText = fullText
+    }
 }

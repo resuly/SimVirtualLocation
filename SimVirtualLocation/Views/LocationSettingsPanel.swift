@@ -226,14 +226,17 @@ struct DirectionPanel: View {
                     } else {
                         ScrollView {
                             VStack(spacing: 4) {
-                                ForEach(Array(locationController.waypoints.enumerated()), id: \.offset) { index, waypoint in
+                                ForEach(0..<locationController.waypoints.count, id: \.self) { index in
+                                    let waypoint = locationController.waypoints[index]
                                     WaypointRow(
                                         index: index,
                                         waypoint: waypoint,
+                                        isSimulating: locationController.isSimulating,
                                         onDelete: {
                                             locationController.deleteWaypoint(at: index)
                                         }
                                     )
+                                    .id("\(waypoint.coordinate.latitude)_\(waypoint.coordinate.longitude)_\(index)")
                                 }
                             }
                         }
@@ -248,7 +251,7 @@ struct DirectionPanel: View {
             }, label: {
                 Text("Clear All").frame(maxWidth: .infinity)
             })
-            .disabled(locationController.waypoints.isEmpty)
+            .disabled(locationController.waypoints.isEmpty || locationController.isSimulating)
 
             // Speed control
             GroupBox {
@@ -330,6 +333,7 @@ struct DirectionPanel: View {
 struct WaypointRow: View {
     let index: Int
     let waypoint: MKPointAnnotation
+    let isSimulating: Bool
     let onDelete: () -> Void
 
     var body: some View {
@@ -338,6 +342,7 @@ struct WaypointRow: View {
             Image(systemName: "line.3.horizontal")
                 .foregroundColor(.secondary)
                 .font(.caption)
+                .opacity(isSimulating ? 0.3 : 1.0)  // Dim during simulation
 
             // Waypoint number
             Text("\(index + 1).")
@@ -368,9 +373,10 @@ struct WaypointRow: View {
             // Delete button
             Button(action: onDelete) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
+                    .foregroundColor(isSimulating ? .gray : .red)
             }
             .buttonStyle(.plain)
+            .disabled(isSimulating)  // Disable during simulation
         }
         .padding(6)
         .background(Color.gray.opacity(0.1))
