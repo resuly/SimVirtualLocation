@@ -1,6 +1,18 @@
-# SimVirtualLocation
+# SimVirtualLocation - Enhanced Edition
 
-Easy to use MacOS 11+ application for easy mocking iOS device and simulator location in realtime. Built on top of  [set-simulator-location](https://github.com/MobileNativeFoundation/set-simulator-location) for iOS Simulators and [pymobiledevice3](https://github.com/doronz88/pymobiledevice3). Android support is realized with [SimVirtualLocation](https://github.com/nexron171/android-mock-location-for-development) android app which is fork from [android-mock-location-for-development](https://github.com/amotzte/android-mock-location-for-development).
+> **This is an enhanced fork** of [nexron171/SimVirtualLocation](https://github.com/nexron171/SimVirtualLocation) with significant improvements and new features. Original credits to [Sergey Shirnin](https://github.com/nexron171) and contributors.
+
+Easy to use MacOS 11+ application for mocking iOS device and simulator location in realtime. Built on top of [set-simulator-location](https://github.com/MobileNativeFoundation/set-simulator-location) for iOS Simulators and [pymobiledevice3](https://github.com/doronz88/pymobiledevice3). Android support is realized with helper app forked from [android-mock-location-for-development](https://github.com/amotzte/android-mock-location-for-development).
+
+## What's New in This Enhanced Version
+
+- **Enhanced Route Simulation Controls**: Advanced waypoint management with real-time direction tracking
+- **Direction Mode**: Visual heading/bearing display for simulated movement
+- **Route Debug Window**: Visual debugging interface for route simulation
+- **Improved Python Path Detection**: Automatically finds `pymobiledevice3` across multiple installation locations (Homebrew ARM64/Intel, pip user/local, Anaconda)
+- **Build Automation**: Complete build script (`build.sh`) for easy compilation and distribution
+- **Enhanced UI**: Significantly improved location settings panel with better controls
+- **Code Quality**: Major refactoring with improved architecture and error handling
 
 Posibilities:
 - supports both iOS and Android
@@ -8,9 +20,19 @@ Posibilities:
 - set location to point on map
 - make route between two points and simulate moving with desired speed
 
-You can dowload compiled and signed app [here](https://github.com/nexron171/SimVirtualLocation/releases).
+You can download the compiled app from [Releases](https://github.com/resuly/SimVirtualLocation/releases).
 
+Original project releases: [nexron171/SimVirtualLocation](https://github.com/nexron171/SimVirtualLocation/releases)
+
+## Screenshots
+
+### Classic Mode
 ![App Screen Shot](https://raw.githubusercontent.com/nexron171/SimVirtualLocation/master/assets/screenshot.png)
+
+### Direction Mode (New!)
+![Direction Mode Screenshot](assets/screenshot2.jpg)
+
+**Direction Mode** allows you to create multi-point routes with draggable waypoints. Each waypoint can be repositioned on the map by dragging, giving you precise control over your simulated route. The route automatically recalculates as you move waypoints around.
 
 ## FAQ
 ---
