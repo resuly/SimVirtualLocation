@@ -273,57 +273,32 @@ class Runner {
     }
 
     func taskForIOS(args: [String], showAlert: (String) -> Void) async throws -> Process {
-        let whichTask = Process()
-        let whichURL = URL(fileURLWithPath: "/usr/bin/find")
-        let userPath = "/Users/\(NSUserName())/Library"
-        whichTask.executableURL = whichURL
-        whichTask.currentDirectoryURL = URL(fileURLWithPath: userPath)
-        whichTask.arguments = ["Python", "-name", "pymobiledevice3"]
-
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-
-        whichTask.standardOutput = outputPipe
-        whichTask.standardError = errorPipe
-
-        try whichTask.run()
-        whichTask.waitUntilExit()
-
+        // Check cache
         if pymobiledevicePath == nil || pymobiledevicePath == "" {
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            try outputPipe.fileHandleForReading.close()
-            let rawValue = String(decoding: data, as: UTF8.self)
-            let sortedPaths = rawValue.split(separator: "\n").sorted{ a, b in
-                b.localizedCaseInsensitiveCompare(a) == .orderedDescending
-            }
+            pymobiledevicePath = findPymobiledevice3Path()
 
-            if let path = sortedPaths.first {
-                pymobiledevicePath = "\(userPath)/\(String(path))"
-            } else {
+            if pymobiledevicePath == nil {
                 showAlert("""
-                pymobiledevice3 not found, it should be installed with python
-                to install pymobiledevice3 properly try install it with following command:
-                `brew install python3 && python3 -m pip install -U pymobiledevice3 --break-system-packages --user`
+                pymobiledevice3 not found. Searched the following locations:
+                • /opt/homebrew/bin/
+                • /usr/local/bin/
+                • ~/.local/bin/
+                • ~/Library/Python/*/bin/
+
+                Installation command:
+                brew install python3 && python3 -m pip install -U pymobiledevice3 --break-system-packages --user
+
+                After installation, verify with: which pymobiledevice3
                 """)
                 pymobiledevicePath = ""
             }
-
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let error = String(decoding: errorData, as: UTF8.self)
-            if !error.isEmpty {
-                showAlert(error)
-            }
-            try? errorPipe.fileHandleForReading.close()
         }
 
-//        #if arch(arm64)
-//        let path: URL = URL(string: "file:///opt/homebrew/bin/pymobiledevice3")!
-//        #else
-//        let path: URL = URL(string: "file:///usr/local/bin/pymobiledevice3")!
-//        #endif
+        guard let validPath = pymobiledevicePath, !validPath.isEmpty else {
+            throw NSError(domain: "Runner", code: 1, userInfo: [NSLocalizedDescriptionKey: "pymobiledevice3 not found"])
+        }
 
-        let path: URL = URL(fileURLWithPath: pymobiledevicePath!)
-
+        let path = URL(fileURLWithPath: validPath)
         let task = Process()
         task.executableURL = path
         task.arguments = args
@@ -333,12 +308,53 @@ class Runner {
 
     // MARK: - Private Methods
 
+    private func findPymobiledevice3Path() -> String? {
+        let fileManager = FileManager.default
+
+        // Check common paths by priority
+        let commonPaths = [
+            "/opt/homebrew/bin/pymobiledevice3",           // ARM64 homebrew
+            "/usr/local/bin/pymobiledevice3",              // Intel homebrew
+            "\(NSHomeDirectory())/.local/bin/pymobiledevice3"  // pip user local
+        ]
+
+        // First check static paths (fast)
+        for path in commonPaths {
+            if fileManager.fileExists(atPath: path) {
+                return path
+            }
+        }
+
+        // Fallback: search ~/Library/Python/*/bin/pymobiledevice3
+        let libraryPath = "\(NSHomeDirectory())/Library/Python"
+
+        guard fileManager.fileExists(atPath: libraryPath) else {
+            return nil
+        }
+
+        do {
+            let pythonVersions = try fileManager.contentsOfDirectory(atPath: libraryPath)
+            let sortedVersions = pythonVersions.sorted().reversed() // Prefer newer versions
+
+            for version in sortedVersions {
+                let binPath = "\(libraryPath)/\(version)/bin/pymobiledevice3"
+                if fileManager.fileExists(atPath: binPath) {
+                    return binPath
+                }
+            }
+        } catch {
+            return nil
+        }
+
+        return nil
+    }
+
     private func taskForAndroid(args: [String], adbPath: String) -> Process {
         let path = adbPath
         let task = Process()
         task.executableURL = URL(string: "file://\(path)")!
         task.arguments = args
-        
+
         return task
     }
 }
