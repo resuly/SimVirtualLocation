@@ -64,11 +64,19 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     @Published var RSDAddress: String = ""
     @Published var RSDPort: String = ""
 
+    @Published var detectedRSDTunnels: [RSDTunnel] = []
+    @Published var selectedRSDTunnel: String = "" // Tunnel ID
+    @Published var deviceReady: Bool = false // Device is ready for location simulation
+    @Published var deviceStatusMessage: String = "" // Status message for device
+
     @Published var timeScale: Double = 1.5 {
         didSet { runner.timeDelay = timeScale }
     }
 
     @Published var logs: [LogEntry] = []
+
+    // Maximum number of log entries to keep in memory (prevent memory leaks)
+    private let maxLogEntries = 500
 
     // MARK: - Direction Mode
 
@@ -164,7 +172,88 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
         connectedDevices = (try? await getConnectedDevices()) ?? []
         selectedDevice = connectedDevices.first?.id ?? ""
+
+        // Auto-setup device after selection
+        await autoSetupDevice()
     }
+
+    @MainActor
+    func autoSetupDevice() async {
+        guard !selectedDevice.isEmpty,
+              let device = connectedDevices.first(where: { $0.id == selectedDevice }) else {
+            deviceReady = false
+            deviceStatusMessage = "No device selected"
+            return
+        }
+
+        if device.requiresRSD {
+            // iOS 17+: Start tunnel automatically
+            deviceStatusMessage = "Starting tunnel..."
+            deviceReady = false
+
+            runner.startTunnel(for: device.id, showAlert: showAlert) { [weak self] result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let tunnelInfo):
+                        self?.RSDAddress = tunnelInfo.host
+                        self?.RSDPort = tunnelInfo.port
+                        self?.deviceStatusMessage = "Ready"
+                        self?.deviceReady = true
+                        self?.log("Tunnel ready: \(tunnelInfo.host):\(tunnelInfo.port)")
+                    case .failure(let error):
+                        self?.deviceStatusMessage = "Tunnel failed"
+                        self?.deviceReady = false
+                        self?.log("Tunnel error: \(error.localizedDescription)")
+                        self?.showAlert("Failed to start tunnel: \(error.localizedDescription)")
+                    }
+                }
+            }
+        } else {
+            // Pre-iOS 17: Ready immediately
+            deviceStatusMessage = "Ready"
+            deviceReady = true
+            log("Device ready (iOS \(device.version))")
+        }
+    }
+
+    func checkIfTunnelRunning() -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "pgrep -f 'pymobiledevice3.*tunneld'"]
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    func showTunneldInstructions() {
+        let command = "sudo pymobiledevice3 remote tunneld"
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(command, forType: .string)
+
+        showAlert("""
+        iOS 17+ requires tunneld
+
+        Please run this command in Terminal:
+        \(command)
+
+        (Command copied to clipboard)
+
+        Then click 'Refresh Devices' in this app.
+        """)
+    }
+
+
+
 
     func setCurrentLocation() {
         guard let location = locationManager.location?.coordinate else {
@@ -412,6 +501,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         timer?.invalidate()
         timer = nil
         runner.stop()
+        tracksTimes.removeAll() // Clear simulation tracking data
         log("Simulation stopped")
     }
 
@@ -678,7 +768,23 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     func showAlert(_ text: String) {
         DispatchQueue.main.async {
-            self.alertText = text
+            // Truncate long error messages (like Python tracebacks)
+            var displayText = text
+
+            // Check for common errors and show friendly messages
+            if text.contains("TimeoutError") || text.contains("timeout") {
+                displayText = "⏱ Connection timeout.\n\nMake sure your iPhone is:\n• Unlocked\n• Connected via USB\n• Trusted on this Mac\n\nReconnecting..."
+            } else if text.contains("ConnectionError") || text.contains("connection") {
+                displayText = "⚠️ Connection lost.\n\nPlease check:\n• iPhone is connected\n• Cable is secure\n\nReconnecting..."
+            } else if text.contains("Traceback") {
+                // Python traceback - extract the error type
+                displayText = "Python error occurred.\n\nCheck logs at bottom for details."
+            } else if displayText.count > 300 {
+                // Long error message - truncate
+                displayText = String(displayText.prefix(300)) + "...\n\n📋 See logs below for full error"
+            }
+
+            self.alertText = displayText
             self.showingAlert = true
             self.isSimulating = false
         }
@@ -744,6 +850,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         isSimulating = true
         lastTrackLocation = nil
         currentTrackIndex = 0
+        tracksTimes.removeAll() // Clear previous simulation data
     }
 
     private func performMovement() {
@@ -928,20 +1035,45 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             return
         }
         if deviceMode == .device {
-            if useRSD {
-                Task {
-                    try await runner.runOnNewIos(
-                        location: location,
-                        RSDAddress: RSDAddress,
-                        RSDPort: RSDPort,
-                        showAlert: showAlert
-                    )
+            // Auto-detect if device requires RSD based on iOS version
+            if let device = connectedDevices.first(where: { $0.id == selectedDevice }),
+               device.requiresRSD {
+                // iOS 17+: Use RSD tunnel connection
+                if !deviceReady || RSDAddress.isEmpty || RSDPort.isEmpty {
+                    showAlert("Device not ready. Please click 'Refresh Devices' to establish tunnel.")
+                    return
                 }
 
+                Task {
+                    do {
+                        try await runner.runOnNewIos(
+                            location: location,
+                            deviceId: selectedDevice,
+                            rsdHost: RSDAddress,
+                            rsdPort: RSDPort,
+                            showAlert: showAlert
+                        )
+                    } catch {
+                        let errorMsg = error.localizedDescription
+                        // If tunnel error, try to reconnect
+                        if errorMsg.contains("Timeout") || errorMsg.contains("timeout") ||
+                           errorMsg.contains("Connection") || errorMsg.contains("connection") {
+                            log("Tunnel error detected: \(errorMsg)")
+                            deviceReady = false
+                            deviceStatusMessage = "Reconnecting..."
+                            showAlert("Tunnel connection lost. Reconnecting...")
+                            await autoSetupDevice()
+                        } else {
+                            showAlert(errorMsg)
+                        }
+                    }
+                }
             } else {
+                // Pre-iOS 17: Use traditional method
                 Task {
                     try await runner.runOnIos(
                         location: location,
+                        deviceId: selectedDevice,
                         showAlert: showAlert
                     )
                 }
@@ -1018,6 +1150,16 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     private func log(_ message: String) {
         logs.insert(LogEntry(date: Date(), message: message), at: 0)
+
+        // Limit log size to prevent memory issues during long simulations
+        if logs.count > maxLogEntries {
+            logs.removeLast(logs.count - maxLogEntries)
+        }
+    }
+
+    func clearLogs() {
+        logs.removeAll()
+        log("Logs cleared")
     }
     // MARK: - Direction Mode Methods
 
@@ -1222,12 +1364,16 @@ private extension LocationController {
 
     @MainActor
     private func getConnectedDevices() async throws -> [Device] {
-        let task = try await runner.taskForIOS(args: ["usbmux", "list", "--no-color", "-u"], showAlert: showAlert)
+        // Fixed: --no-color must be before subcommand
+        let task = try await runner.taskForIOS(args: ["--no-color", "usbmux", "list", "-u"], showAlert: showAlert)
 
         log("getConnectedDevices: \(task.executableURL!.absoluteString) \(task.arguments!.joined(separator: " "))")
 
         let pipe = Pipe()
         task.standardOutput = pipe
+
+        let errorPipe = Pipe()
+        task.standardError = errorPipe
 
         try task.run()
         task.waitUntilExit()
@@ -1236,6 +1382,9 @@ private extension LocationController {
         pipe.fileHandleForReading.closeFile()
 
         if task.terminationStatus != 0 {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorText = String(decoding: errorData, as: UTF8.self)
+            log("Device detection error: \(errorText)")
             throw SimulatorFetchError.simctlFailed
         }
 
