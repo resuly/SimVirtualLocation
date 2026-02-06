@@ -44,11 +44,6 @@ struct iOSDeviceSettings: View {
                         }
                     }
                     .labelsHidden()
-                    .onChange(of: locationController.selectedDevice) { _ in
-                        Task {
-                            await locationController.autoSetupDevice()
-                        }
-                    }
 
                     // Device status indicator
                     if locationController.deviceReady {
@@ -60,13 +55,33 @@ struct iOSDeviceSettings: View {
                     }
                 }
 
-                Button(action: {
-                    Task {
-                        await locationController.refreshDevices()
+                // Connect / Disconnect / Refresh buttons
+                HStack(spacing: 8) {
+                    if locationController.deviceReady {
+                        Button(action: {
+                            locationController.disconnectDevice()
+                        }, label: {
+                            Text("Disconnect").frame(maxWidth: .infinity)
+                        })
+                    } else {
+                        Button(action: {
+                            Task {
+                                await locationController.autoSetupDevice()
+                            }
+                        }, label: {
+                            Text("Connect").frame(maxWidth: .infinity)
+                        })
+                        .disabled(locationController.selectedDevice.isEmpty)
                     }
-                }, label: {
-                    Text("Refresh Devices").frame(maxWidth: .infinity)
-                })
+
+                    Button(action: {
+                        Task {
+                            await locationController.refreshDevices()
+                        }
+                    }, label: {
+                        Text("Refresh").frame(maxWidth: .infinity)
+                    })
+                }
 
                 // Show status message
                 if !locationController.deviceStatusMessage.isEmpty {

@@ -80,60 +80,62 @@ struct ContentView: View {
                 }
                 .modifier(Alert(isPresented: $locationController.showingAlert, text: locationController.alertText))
 
-            VStack(spacing: 0) {
-                HStack {
-                    Text("Logs (\(locationController.logs.count) entries)")
-                        .font(.headline)
-                        .padding(.leading, 8)
-                    Spacer()
-                    if !locationController.logs.isEmpty {
-                        Button("Clear Logs") {
-                            locationController.clearLogs()
-                        }
-                        .padding(.trailing, 8)
-                    }
-                }
-                .frame(height: 30)
-
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(locationController.logs) { log in
-                            HStack(spacing: 0) {
-                                Text(locationController.dateFormatter.string(from: log.date))
-                                    .padding(2)
-                                Text(log.message)
-                                    .lineLimit(nil)
-                                    .multilineTextAlignment(.leading)
-                                    .padding(2)
-
-                                Spacer()
+            if locationController.showLogs {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Logs (\(locationController.logs.count) entries)")
+                            .font(.headline)
+                            .padding(.leading, 8)
+                        Spacer()
+                        if !locationController.logs.isEmpty {
+                            Button("Clear Logs") {
+                                locationController.clearLogs()
                             }
-                            .frame(maxWidth: .infinity)
-                            .background(Color.gray.opacity(0.3))
-                            .cornerRadius(4)
-                            .padding(4)
+                            .padding(.trailing, 8)
                         }
                     }
-                    .frame(maxWidth: .infinity)
-                }.frame(maxWidth: .infinity, maxHeight: 70)
-            }.frame(maxWidth: .infinity, maxHeight: 100)
+                    .frame(height: 30)
 
-            HStack {
-                Button("Copy Logs") {
-                    let log = locationController.logs.map { entry in
-                        let date = locationController.dateFormatter.string(from: entry.date)
-                        let message = entry.message
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(locationController.logs) { log in
+                                HStack(spacing: 0) {
+                                    Text(locationController.dateFormatter.string(from: log.date))
+                                        .padding(2)
+                                    Text(log.message)
+                                        .lineLimit(nil)
+                                        .multilineTextAlignment(.leading)
+                                        .padding(2)
 
-                        return "\(date): \(message)"
-                    }.joined(separator: "\n\n")
+                                    Spacer()
+                                }
+                                .frame(maxWidth: .infinity)
+                                .background(Color.gray.opacity(0.3))
+                                .cornerRadius(4)
+                                .padding(4)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }.frame(maxWidth: .infinity, maxHeight: 70)
+                }.frame(maxWidth: .infinity, maxHeight: 100)
 
-                    let pasteboard = NSPasteboard.general
-                    pasteboard.declareTypes([.string], owner: nil)
+                HStack {
+                    Button("Copy Logs") {
+                        let log = locationController.logs.map { entry in
+                            let date = locationController.dateFormatter.string(from: entry.date)
+                            let message = entry.message
 
-                    pasteboard.setString(log, forType: .string)
-                }
-                .disabled(locationController.logs.isEmpty)
-            }.padding()
+                            return "\(date): \(message)"
+                        }.joined(separator: "\n\n")
+
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.declareTypes([.string], owner: nil)
+
+                        pasteboard.setString(log, forType: .string)
+                    }
+                    .disabled(locationController.logs.isEmpty)
+                }.padding()
+            }
         }.frame(minHeight: 800)
     }
 

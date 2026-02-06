@@ -43,6 +43,14 @@ struct SimVirtualLocationApp: App {
                 .disabled(appState.locationController?.savedLocations.isEmpty ?? true)
             }
 
+            // Add View menu
+            CommandMenu("View") {
+                Button(appState.locationController?.showLogs == true ? "Hide Logs" : "Show Logs") {
+                    appState.locationController?.showLogs.toggle()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+            }
+
             // Add Debug menu
             CommandMenu("Debug") {
                 Button("View Apple Maps Route Info") {

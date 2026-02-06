@@ -147,6 +147,11 @@ struct LocationSettingsPanel: View {
                     .padding(.vertical, 4)
                 }
 
+                if locationController.isSimulating {
+                    SimulationInfoPanel()
+                        .environmentObject(locationController)
+                }
+
                 GroupBox {
                     if locationController.useRSD {
                         Picker("Frequency", selection: $locationController.timeScale) {
@@ -195,9 +200,74 @@ struct LocationSettingsPanel_Previews: PreviewProvider {
 
 struct DirectionPanel: View {
     @EnvironmentObject var locationController: LocationController
+    @State private var showSavePreset = false
+    @State private var presetName = ""
 
     var body: some View {
         VStack {
+            // Route presets
+            GroupBox {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Route Presets")
+                        .font(.headline)
+
+                    ForEach(locationController.routePresets) { preset in
+                        HStack {
+                            Button(action: {
+                                locationController.loadPreset(preset)
+                            }, label: {
+                                HStack {
+                                    Image(systemName: "mappin.and.ellipse")
+                                    Text(preset.name)
+                                    Spacer()
+                                    Text("\(preset.coordinates.count) pts")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                            })
+                            .disabled(locationController.isSimulating)
+
+                            // Delete button (only for user presets)
+                            if !RoutePreset.builtIn.contains(where: { $0.name == preset.name }) {
+                                Button(action: {
+                                    locationController.deletePreset(preset)
+                                }) {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+
+                    // Save current route as preset
+                    if !locationController.waypoints.isEmpty && !locationController.isSimulating {
+                        Divider()
+                        Button(action: {
+                            presetName = ""
+                            showSavePreset = true
+                        }, label: {
+                            HStack {
+                                Image(systemName: "plus.circle")
+                                Text("Save Current Route")
+                            }
+                            .frame(maxWidth: .infinity)
+                        })
+                        .alert("Save Route Preset", isPresented: $showSavePreset) {
+                            TextField("Preset name", text: $presetName)
+                            Button("Save") {
+                                if !presetName.isEmpty {
+                                    locationController.saveCurrentRouteAsPreset(name: presetName)
+                                }
+                            }
+                            Button("Cancel", role: .cancel) { }
+                        }
+                    }
+                }
+            }
+
             // Operation hint
             Text(locationController.directionHintText)
                 .font(.caption)
@@ -265,6 +335,11 @@ struct DirectionPanel: View {
                 .padding(.vertical, 4)
             }
 
+            if locationController.isSimulating {
+                SimulationInfoPanel()
+                    .environmentObject(locationController)
+            }
+
             // Frequency
             GroupBox {
                 if locationController.useRSD {
@@ -326,6 +401,57 @@ struct DirectionPanel: View {
 
             Spacer()
         }
+    }
+}
+
+// MARK: - Simulation Info Panel
+
+struct SimulationInfoPanel: View {
+    @EnvironmentObject var locationController: LocationController
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Simulation")
+                    .font(.headline)
+
+                HStack {
+                    Image(systemName: "speedometer")
+                        .foregroundColor(.blue)
+                    Text("Speed:")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(String(format: "%.1f km/h", locationController.currentSimSpeed * 3.6))
+                        .font(.subheadline)
+                        .monospacedDigit()
+                }
+
+                HStack {
+                    Image(systemName: "location.north.fill")
+                        .foregroundColor(.blue)
+                        .rotationEffect(.degrees(locationController.currentSimCourse >= 0 ? locationController.currentSimCourse : 0))
+                    Text("Heading:")
+                        .font(.subheadline)
+                    Spacer()
+                    if locationController.currentSimCourse >= 0 {
+                        Text(String(format: "%.0f\u{00B0} %@", locationController.currentSimCourse, compassDirection(for: locationController.currentSimCourse)))
+                            .font(.subheadline)
+                            .monospacedDigit()
+                    } else {
+                        Text("--")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func compassDirection(for degrees: Double) -> String {
+        let directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        let index = Int(((degrees + 22.5) / 45.0).truncatingRemainder(dividingBy: 8))
+        return directions[index]
     }
 }
 

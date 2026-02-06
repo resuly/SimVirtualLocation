@@ -37,6 +37,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     @Published var isSimulating = false
     @Published var isPaused = false
+    @Published var currentSimSpeed: Double = 0.0    // m/s, current simulation speed
+    @Published var currentSimCourse: Double = -1.0  // degrees 0-360, -1 = unavailable
     @Published var speed: Double = 60.0
     @Published var pointsMode: PointsMode = .direction {
         didSet { handlePointsModeChange() }
@@ -74,6 +76,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     @Published var logs: [LogEntry] = []
+    @Published var showLogs: Bool = false
 
     // Maximum number of log entries to keep in memory (prevent memory leaks)
     private let maxLogEntries = 500
@@ -129,6 +132,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     private var timer: Timer?
 
     @Published var savedLocations: [Location] = []
+    @Published var routePresets: [RoutePreset] = []
 
     // MARK: - Init
 
@@ -160,6 +164,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             xcodePath = defaults.string(forKey: Constants.defaultsXcodePathKey) ?? "/Applications/Xcode.app"
 
             loadLocations()
+            loadRoutePresets()
         }
     }
 
@@ -173,8 +178,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         connectedDevices = (try? await getConnectedDevices()) ?? []
         selectedDevice = connectedDevices.first?.id ?? ""
 
-        // Auto-setup device after selection
-        await autoSetupDevice()
+        // Reset device connection state (user must explicitly connect)
+        deviceReady = false
+        deviceStatusMessage = connectedDevices.isEmpty ? "No devices found" : "Select a device and tap Connect"
     }
 
     @MainActor
@@ -214,6 +220,15 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             deviceReady = true
             log("Device ready (iOS \(device.version))")
         }
+    }
+
+    func disconnectDevice() {
+        runner.stop()
+        deviceReady = false
+        deviceStatusMessage = "Disconnected"
+        RSDAddress = ""
+        RSDPort = ""
+        log("Device disconnected")
     }
 
     func checkIfTunnelRunning() -> Bool {
@@ -386,11 +401,23 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         print(tracks.map { CLLocation.distance(from: $0.startPoint.coordinate, to: $0.endPoint.coordinate) })
         
         invalidateState()
-        
+
+        // Set initial position
+        let startCoord = tracks[0].startPoint.coordinate
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+        currentSimulationAnnotation.coordinate = startCoord
+        currentSimulationAnnotation.title = "Current location"
+        mapView.mkMapView.addAnnotation(currentSimulationAnnotation)
+        run(location: startCoord)
+
+        // Center map on start position
+        let region = MKCoordinateRegion(center: startCoord, latitudinalMeters: 1000, longitudinalMeters: 1000)
+        mapView.mkMapView.setRegion(region, animated: true)
+
         let timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
             self.performMovement()
         }
-        
+
         self.timer = timer
     }
 
@@ -407,6 +434,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         tracks = [Track(startPoint: MKMapPoint(startPoint.coordinate), endPoint: MKMapPoint(endPoint.coordinate))]
 
         invalidateState()
+
+        // Set initial position
+        let startCoord = tracks[0].startPoint.coordinate
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+        currentSimulationAnnotation.coordinate = startCoord
+        currentSimulationAnnotation.title = "Current location"
+        mapView.mkMapView.addAnnotation(currentSimulationAnnotation)
+        run(location: startCoord)
+
+        // Center map on start position
+        let region = MKCoordinateRegion(center: startCoord, latitudinalMeters: 1000, longitudinalMeters: 1000)
+        mapView.mkMapView.setRegion(region, animated: true)
 
         let timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
             self.performMovement()
@@ -498,6 +537,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     func stopSimulation() {
         isSimulating = false
         isPaused = false
+        currentSimSpeed = 0.0
+        currentSimCourse = -1.0
         timer?.invalidate()
         timer = nil
         runner.stop()
@@ -844,6 +885,24 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         }
     }
 
+    private func loadRoutePresets() {
+        var presets = RoutePreset.builtIn
+        if let data = defaults.data(forKey: Constants.defaultsRoutePresetsKey),
+           let userPresets = try? JSONDecoder().decode([RoutePreset].self, from: data) {
+            presets.append(contentsOf: userPresets)
+        }
+        routePresets = presets
+    }
+
+    private func saveUserRoutePresets() {
+        // Only save user-created presets (exclude built-in)
+        let builtInNames = Set(RoutePreset.builtIn.map { $0.name })
+        let userPresets = routePresets.filter { !builtInNames.contains($0.name) }
+        if let data = try? JSONEncoder().encode(userPresets) {
+            defaults.set(data, forKey: Constants.defaultsRoutePresetsKey)
+        }
+    }
+
     private func invalidateState() {
         timer?.invalidate()
         timer = nil
@@ -876,22 +935,37 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         self.mapView.mkMapView.removeAnnotation(self.currentSimulationAnnotation)
 
         switch trackMove {
-            case .moveTo(let to, let from, let speed):
+            case .moveTo(let to, let from, let withSpeed):
                 self.lastTrackLocation = to
-                self.run(location: to)
+                let bearing = from.bearing(to: to)
+                let actualSpeed = withSpeed / self.timeScale  // Convert distance-per-tick to m/s
+                self.currentSimSpeed = actualSpeed
+                self.currentSimCourse = bearing
+                self.run(location: to, speed: actualSpeed, course: bearing)
                 self.currentSimulationAnnotation.coordinate = to
-                print("move to - distance=\(CLLocation.distance(from: from, to: to)), speed=\(speed)")
+                print("move to - distance=\(CLLocation.distance(from: from, to: to)), speed=\(actualSpeed), course=\(bearing)")
 
-            case .finishTo(let to, let from, let speed):
+            case .finishTo(let to, let from, let withSpeed):
                 self.lastTrackLocation = nil
                 self.currentTrackIndex += 1
-                self.run(location: to)
+                let bearing = from.bearing(to: to)
+                let actualSpeed = withSpeed / self.timeScale  // Convert distance-per-tick to m/s
+                self.currentSimSpeed = actualSpeed
+                self.currentSimCourse = bearing
+                self.run(location: to, speed: actualSpeed, course: bearing)
                 self.currentSimulationAnnotation.coordinate = to
-                print("finish to - distance=\(CLLocation.distance(from: from, to: to)), speed=\(speed)")
+                print("finish to - distance=\(CLLocation.distance(from: from, to: to)), speed=\(actualSpeed), course=\(bearing)")
         }
 
         self.tracksTimes[track] = (self.tracksTimes[track] ?? 0) + self.timeScale
         self.mapView.mkMapView.addAnnotation(self.currentSimulationAnnotation)
+
+        // Keep map centered on current simulation position
+        let region = MKCoordinateRegion(
+            center: self.currentSimulationAnnotation.coordinate,
+            span: self.mapView.mkMapView.region.span
+        )
+        self.mapView.mkMapView.setRegion(region, animated: true)
     }
     
     private func executeAdbCommand(args: [String], successMessage: String? = nil) {
@@ -991,6 +1065,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func handleSet(point: CGPoint) {
+        guard !isSimulating else { return }
+
         let clickLocation = mapView.mkMapView.convert(point, toCoordinateFrom: mapView.mkMapView)
 
         if pointsMode == .direction {
@@ -1020,12 +1096,12 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         self.mapView.mkMapView.addAnnotation(annotation)
     }
 
-    private func run(location: CLLocationCoordinate2D) {
+    private func run(location: CLLocationCoordinate2D, speed: Double? = nil, course: Double? = nil) {
         defaults.set(deviceType, forKey: "device_type")
         defaults.set(adbPath, forKey: "adb_path")
         defaults.set(adbDeviceId, forKey: "adb_device_id")
         defaults.set(isEmulator, forKey: "is_emulator")
-        
+
         if deviceType != 0 {
             do {
                 try runOnAndroid(location: location)
@@ -1087,6 +1163,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
                 location: location,
                 selectedSimulator: selectedSimulator,
                 bootedSimulators: bootedSimulators,
+                speed: speed,
+                course: course,
                 showAlert: showAlert
             )
         }
@@ -1161,6 +1239,57 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         logs.removeAll()
         log("Logs cleared")
     }
+
+    // MARK: - Route Presets
+
+    func loadPreset(_ preset: RoutePreset) {
+        if pointsMode != .direction {
+            pointsMode = .direction
+        }
+
+        // Clear existing waypoints
+        clearAllWaypoints()
+
+        // Add waypoints from preset
+        for coord in preset.coordinates {
+            addWaypoint(coordinate: coord.clCoordinate)
+        }
+
+        log("Loaded preset: \(preset.name) (\(preset.coordinates.count) points)")
+    }
+
+    func saveCurrentRouteAsPreset(name: String) {
+        guard !waypoints.isEmpty else {
+            showAlert("No waypoints to save")
+            return
+        }
+
+        let coordinates = waypoints.map {
+            RoutePreset.Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
+        }
+        let preset = RoutePreset(name: name, coordinates: coordinates)
+
+        // Replace if same name exists (among user presets)
+        let builtInNames = Set(RoutePreset.builtIn.map { $0.name })
+        if !builtInNames.contains(name) {
+            routePresets.removeAll { $0.name == name }
+        }
+        routePresets.append(preset)
+        saveUserRoutePresets()
+        log("Saved preset: \(name)")
+    }
+
+    func deletePreset(_ preset: RoutePreset) {
+        let builtInNames = Set(RoutePreset.builtIn.map { $0.name })
+        guard !builtInNames.contains(preset.name) else {
+            showAlert("Cannot delete built-in preset")
+            return
+        }
+        routePresets.removeAll { $0.name == preset.name }
+        saveUserRoutePresets()
+        log("Deleted preset: \(preset.name)")
+    }
+
     // MARK: - Direction Mode Methods
 
     func addWaypoint(coordinate: CLLocationCoordinate2D) {
@@ -1235,10 +1364,11 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         clearRouteOverlays()
 
         // Calculate routes between each pair of consecutive waypoints
-        var allRoutes: [MKRoute] = []
+        let segmentCount = waypoints.count - 1
+        var allRoutes: [MKRoute?] = Array(repeating: nil, count: segmentCount)
         let group = DispatchGroup()
 
-        for i in 0..<(waypoints.count - 1) {
+        for i in 0..<segmentCount {
             group.enter()
 
             let start = MKPlacemark(coordinate: waypoints[i].coordinate)
@@ -1266,7 +1396,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
                 defer { group.leave() }
 
                 if let route = response?.routes.first {
-                    allRoutes.append(route)
+                    allRoutes[i] = route
                     // Log alternate routes if available
                     if let routeCount = response?.routes.count, routeCount > 1 {
                         self?.log("Segment \(i+1): \(routeCount) route options available")
@@ -1280,16 +1410,17 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
 
-            // Save routes for simulation
-            self.directionRoutes = allRoutes
+            // Save routes for simulation, filtering out any failed segments
+            let orderedRoutes = allRoutes.compactMap { $0 }
+            self.directionRoutes = orderedRoutes
 
             // Add all route segments to map
-            for route in allRoutes {
+            for route in orderedRoutes {
                 self.mapView.mkMapView.addOverlay(route.polyline, level: .aboveRoads)
             }
 
             // Calculate total distance
-            let totalDistance = allRoutes.reduce(0.0) { $0 + $1.distance }
+            let totalDistance = orderedRoutes.reduce(0.0) { $0 + $1.distance }
             self.log("Route generated: \(String(format: "%.1f", totalDistance / 1000)) km")
 
             // Adjust map to show all waypoints
@@ -1347,10 +1478,17 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         lastTrackLocation = nil
         isSimulating = true
 
+        // Set initial position and send to device
+        let startCoord = tracks[0].startPoint.coordinate
         mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
-        currentSimulationAnnotation.coordinate = tracks[0].startPoint.coordinate
+        currentSimulationAnnotation.coordinate = startCoord
         currentSimulationAnnotation.title = "Current location"
         mapView.mkMapView.addAnnotation(currentSimulationAnnotation)
+        run(location: startCoord)
+
+        // Center map on start position
+        let region = MKCoordinateRegion(center: startCoord, latitudinalMeters: 1000, longitudinalMeters: 1000)
+        mapView.mkMapView.setRegion(region, animated: true)
 
         timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
             self.performMovement()
@@ -1825,10 +1963,27 @@ extension CLLocation {
     }
 }
 
+extension CLLocationCoordinate2D {
+
+    /// Calculates geodesic bearing from this coordinate to another, in degrees (0-360).
+    func bearing(to destination: CLLocationCoordinate2D) -> Double {
+        let lat1 = self.latitude * .pi / 180.0
+        let lat2 = destination.latitude * .pi / 180.0
+        let dLon = (destination.longitude - self.longitude) * .pi / 180.0
+
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        let radiansBearing = atan2(y, x)
+
+        return (radiansBearing * 180.0 / .pi + 360.0).truncatingRemainder(dividingBy: 360.0)
+    }
+}
+
 private enum Constants {
 
     static let defaultsSavedLocationsPathKey = "saved_locations"
     static let defaultsXcodePathKey = "xcode_path"
+    static let defaultsRoutePresetsKey = "route_presets"
 }
 
 // MARK: - Route Debug Data

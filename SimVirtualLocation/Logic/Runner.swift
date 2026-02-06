@@ -42,6 +42,8 @@ class Runner {
         location: CLLocationCoordinate2D,
         selectedSimulator: String,
         bootedSimulators: [Simulator],
+        speed: Double? = nil,
+        course: Double? = nil,
         showAlert: @escaping (String) -> Void
     ) {
         let simulators = bootedSimulators
@@ -50,7 +52,12 @@ class Runner {
 
         log?("set simulator location \(location.description)")
 
-        NotificationSender.postNotification(for: location, to: simulators)
+        NotificationSender.postNotification(
+            for: location,
+            to: simulators,
+            speed: speed,
+            course: course
+        )
     }
     
     func runOnIos(
