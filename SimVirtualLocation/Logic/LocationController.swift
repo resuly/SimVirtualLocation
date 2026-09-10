@@ -1727,8 +1727,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         // observer map. Never send a second location writer over that scenario.
         if replayDevice == nil { run(location: position, speed: currentSimSpeed, course: currentSimCourse) }
         if currentTrackIndex == tracks.count {
-            stopSimulation()
-            replayInjectionStatus = "complete"
+            if replayDevice == nil {
+                stopSimulation()
+                replayInjectionStatus = "complete"
+            } else {
+                // The local marker has reached the file endpoint, but simctl
+                // owns the device injection and has no completion callback.
+                // Keep the scenario active so a slower device replay is not
+                // cleared based on this estimate alone.
+                timer?.invalidate()
+                timer = nil
+                log("Local replay estimate reached the route endpoint; simulator injection remains active until stopped")
+            }
         }
     }
 

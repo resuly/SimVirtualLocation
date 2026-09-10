@@ -16,7 +16,7 @@ SimVirtualLocation 保留地图窗口作为观察面，也可通过 `./simvirtua
 
 构建是增量 Debug 构建，不清理旧产物。App 在 `build/Build/Products/Debug/SimVirtualLocation.app`，CLI 在 `build/cli/`。启动前退出另一个正在运行的旧版 App。模拟器必须已启动，API 要求明确选择一个 iOS 模拟器。
 
-`start` 异步注入，响应的 `injection_status` 首先为 `starting`；继续查询 `status`，`active` 表示 simctl 已确认开始。失败为 `failed` 并带 `injection_error`。CLI 的 `ok:false` 会退出非零；收到请求与模拟器已开始移动是两个状态。
+`start` 异步注入，响应的 `injection_status` 首先为 `starting`；继续查询 `status`，`active` 表示 simctl 已确认开始。原轨迹模拟器回放的本地观察标记到达文件终点只代表估计位置到达，仍保持 `active`，不会据此清除 simctl 场景或宣称设备已完成；需要用户调用 `stop` 清理后才能重新 `start`。失败为 `failed` 并带 `injection_error`。CLI 的 `ok:false` 会退出非零；收到请求与模拟器已开始移动是两个状态。
 
 ```sh
 ./simvirtual configure '{"speed_kmh":54}'
