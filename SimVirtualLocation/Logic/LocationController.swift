@@ -1578,7 +1578,16 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             guard let self = self else { return }
             guard self.routeGeneration == generation, self.importedRoute == nil else { return }
 
-            // Save routes for simulation, filtering out any failed segments
+            // A partial route would silently skip waypoints during simulation.
+            let missingSegments = allRoutes.indices.filter { allRoutes[$0] == nil }
+            guard missingSegments.isEmpty else {
+                self.directionRoutes = []
+                let segments = missingSegments.map { "\($0 + 1)→\($0 + 2)" }.joined(separator: ", ")
+                self.showNonFatalAlert("Apple Maps could not plan route segments \(segments). Adjust the waypoints or retry before starting simulation.")
+                return
+            }
+
+            // Publish routes only after every consecutive segment is ready.
             let orderedRoutes = allRoutes.compactMap { $0 }
             self.directionRoutes = orderedRoutes
 
@@ -1729,8 +1738,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             return
         }
 
-        guard !directionRoutes.isEmpty else {
-            showAlert("Route not ready. Please wait for route generation to complete.")
+        guard directionRoutes.count == waypoints.count - 1 else {
+            showAlert("The full route is not ready. Wait for route planning to finish, or adjust the waypoints and retry.")
             return
         }
 

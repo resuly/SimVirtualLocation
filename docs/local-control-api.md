@@ -51,6 +51,8 @@ Apple 输出是该组途经点的地图规划对照，不是 AuDrive 已审核�
 
 旧 GUI 的 Apple 诊断仍可用 `⌘⇧D` 打开。
 
+GUI 的途经点规划也要求每一段都成功；任一段失败会提示对应段号，并阻止启动残缺路线。调整途经点后可重新规划。
+
 ## 直接 JSON 调用
 
 ```sh
@@ -62,11 +64,12 @@ printf '%s\n' '{"command":"status"}' | ./simvirtual -
 
 ## 本轮验收
 
-2026-09-10，iPhone 17 / iOS 26.5 与 AuDrive Debug 原生导航：
+2026-09-10，iPhone 17 / iOS 26.5 模拟器与 AuDrive Debug 原生导航：
 
 - GeoJSON API 往返保留 Carlton Route 9 Stage 1 全部 103 个坐标。
 - 命令回放中 AuDrive 显示 36 km/h，调整后 54 km/h；已走路线变灰，前方路线保持 Stage 色。
 - 无效配置不部分生效，无效导入保留现有路线；暂停 6 秒观察位置不变，AuDrive 过期读数显示 `—`；恢复和 App 前后台切换后读数继续更新。
 - 原始 Core Location 实测 simctl 的速度正确，但 speedAccuracy=-1。AuDrive 只在 Debug Simulator 中标注 `Simulated speed`，真机 GPS 校验没有放宽。
+- Apple GUI 缺段保护通过 30 项实际源码行为检查，覆盖首段、中段、末段失败、完整路线、成功重试与过期回调；分别移除发布和启动保护后，检查均能捕获行为错误。Mac Debug 重新构建通过。
 
 道路实测、物理手机的定位注入以及商店发布不包含在这些模拟器证据中。
