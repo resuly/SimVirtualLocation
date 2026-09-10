@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+project_dir="$(cd "$(dirname "$0")" && pwd)"
+command_name="${1:-help}"
+case "$command_name" in
+  help|--help|-h)
+    cat <<'HELP'
+SimVirtualLocation local JSON API
+  ./build-api.sh                          Build the app and CLI helpers
+  ./simvirtual launch                    Start the app and wait for the API
+  ./simvirtual simulators                List booted iOS simulators
+  ./simvirtual configure '{"simulator":"UDID","speed_kmh":36,"interval_s":1}'
+  ./simvirtual load-route route.geojson   Import exact geometry, without Apple routing
+  ./simvirtual start|pause|resume|stop     Control the same replay shown in the app
+  ./simvirtual status|route|debug         Read state, original coordinates, or route feedback
+  ./simvirtual apple-directions points.json
+                                         Get full Apple route/step geometry; no app required
+  ./simvirtual -                         Read a JSON API request from stdin
+HELP
+    ;;
+  apple-directions)
+    shift
+    exec "$project_dir/build/cli/apple-directions" "$@"
+    ;;
+  launch)
+    open -g "$project_dir/build/Build/Products/Debug/SimVirtualLocation.app"
+    for attempt in {1..40}; do
+      if control_output="$("$project_dir/build/cli/simvirtual-control" status 2>/dev/null)"; then
+        printf '%s\n' "$control_output"
+        exit 0
+      fi
+      sleep 0.25
+    done
+    echo '{"ok":false,"error":"App API did not start; check app logs and close another running copy"}'
+    exit 1
+    ;;
+  *)
+    exec "$project_dir/build/cli/simvirtual-control" "$@"
+    ;;
+esac

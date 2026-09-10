@@ -29,6 +29,10 @@
 		EDFC771F2B0A54860058B13A /* LocationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDFC771E2B0A54860058B13A /* LocationsView.swift */; };
 		EDFC77212B0A55050058B13A /* Locations.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDFC77202B0A55050058B13A /* Locations.swift */; };
 		EDFC77232B0A55060058B13A /* RoutePreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDFC77222B0A55060058B13A /* RoutePreset.swift */; };
+		EA0D00010000000000000001 /* GeoJSONRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0D00020000000000000001 /* GeoJSONRoute.swift */; };
+		EA0D00010000000000000002 /* ControlAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0D00020000000000000002 /* ControlAPI.swift */; };
+		EA0D00010000000000000003 /* ControlCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0D00020000000000000003 /* ControlCommands.swift */; };
+		EA0D00010000000000000004 /* SimulatorRouteReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0D00020000000000000004 /* SimulatorRouteReplay.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -56,6 +60,10 @@
 		EDFC771E2B0A54860058B13A /* LocationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationsView.swift; sourceTree = "<group>"; };
 		EDFC77202B0A55050058B13A /* Locations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Locations.swift; sourceTree = "<group>"; };
 		EDFC77222B0A55060058B13A /* RoutePreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutePreset.swift; sourceTree = "<group>"; };
+		EA0D00020000000000000001 /* GeoJSONRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeoJSONRoute.swift; sourceTree = "<group>"; };
+		EA0D00020000000000000002 /* ControlAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlAPI.swift; sourceTree = "<group>"; };
+		EA0D00020000000000000003 /* ControlCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlCommands.swift; sourceTree = "<group>"; };
+		EA0D00020000000000000004 /* SimulatorRouteReplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorRouteReplay.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -105,6 +113,9 @@
 			isa = PBXGroup;
 			children = (
 				ED8824F527C38044007499B7 /* LocationController.swift */,
+				EA0D00020000000000000004 /* SimulatorRouteReplay.swift */,
+				EA0D00020000000000000003 /* ControlCommands.swift */,
+				EA0D00020000000000000002 /* ControlAPI.swift */,
 				ED76C13927C160A200E74500 /* NotificationSender.swift */,
 				EDEF747C283621EB00319E02 /* Runner.swift */,
 			);
@@ -120,6 +131,7 @@
 				EDFC77202B0A55050058B13A /* Locations.swift */,
 				EDDB312D2BFCE6FE0079D10D /* LogEntry.swift */,
 				EDFC77222B0A55060058B13A /* RoutePreset.swift */,
+				EA0D00020000000000000001 /* GeoJSONRoute.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -228,6 +240,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				ED8824F627C38044007499B7 /* LocationController.swift in Sources */,
+				EA0D00010000000000000004 /* SimulatorRouteReplay.swift in Sources */,
+				EA0D00010000000000000003 /* ControlCommands.swift in Sources */,
+				EA0D00010000000000000002 /* ControlAPI.swift in Sources */,
 				ED82D39227C1FC8C0093656B /* MapView.swift in Sources */,
 				ED82D38E27C1FC2C0093656B /* Main.swift in Sources */,
 				ED76C13A27C160A200E74500 /* NotificationSender.swift in Sources */,
@@ -245,6 +260,7 @@
 				EDEF747D283621EB00319E02 /* Runner.swift in Sources */,
 				EDDB312E2BFCE6FE0079D10D /* LogEntry.swift in Sources */,
 				EDFC77232B0A55060058B13A /* RoutePreset.swift in Sources */,
+				EA0D00010000000000000001 /* GeoJSONRoute.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

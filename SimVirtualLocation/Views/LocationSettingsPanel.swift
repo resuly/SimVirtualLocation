@@ -27,8 +27,11 @@ struct LocationSettingsPanel: View {
                 }.pickerStyle(.segmented)
             }
 
-            // Show Direction panel when Direction mode is selected
-            if locationController.pointsMode == .direction {
+            if let importedRoute = locationController.importedRoute {
+                ImportedRoutePanel(route: importedRoute)
+                    .environmentObject(locationController)
+            } else if locationController.pointsMode == .direction {
+                // Show Direction panel when Direction mode is selected
                 DirectionPanel()
                     .environmentObject(locationController)
             } else {
@@ -193,6 +196,109 @@ struct LocationSettingsPanel: View {
 struct LocationSettingsPanel_Previews: PreviewProvider {
     static var previews: some View {
         LocationSettingsPanel()
+    }
+}
+
+// MARK: - Imported Route Panel
+
+struct ImportedRoutePanel: View {
+    @EnvironmentObject var locationController: LocationController
+    let route: GeoJSONRoute
+
+    var body: some View {
+        VStack {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Imported route")
+                        .font(.headline)
+                    Text(route.displayName)
+                        .font(.subheadline)
+                    Text(String(format: "%d points • %.2f km", route.pointCount, route.distanceMeters / 1000.0))
+                        .font(.subheadline)
+                    Text("Original geometry; Apple Maps routing is not used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Speed")
+                        .font(.headline)
+                    Slider(value: $locationController.speed, in: 0...200, step: 5)
+                    Text("\(Int(locationController.speed.rounded(.up))) km/h")
+                        .font(.subheadline)
+                }
+                .padding(.vertical, 4)
+            }
+
+            if locationController.isSimulating {
+                SimulationInfoPanel()
+                    .environmentObject(locationController)
+            }
+
+            GroupBox {
+                if locationController.useRSD {
+                    Picker("Frequency", selection: $locationController.timeScale) {
+                        Text("5s").tag(5.0)
+                        Text("10s").tag(10.0)
+                        Text("15s").tag(15.0)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(locationController.isSimulating)
+                    .onAppear {
+                        locationController.timeScale = 5.0
+                    }
+                } else {
+                    Picker("Frequency", selection: $locationController.timeScale) {
+                        Text("0.5s").tag(0.5)
+                        Text("1s").tag(1.0)
+                        Text("1.5s").tag(1.5)
+                        Text("2s").tag(2.0)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(locationController.isSimulating)
+                }
+            }
+
+            HStack {
+                if locationController.isSimulating {
+                    Button(action: {
+                        if locationController.isPaused {
+                            locationController.resumeSimulation()
+                        } else {
+                            locationController.pauseSimulation()
+                        }
+                    }) {
+                        Text(locationController.isPaused ? "Resume" : "Pause")
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    Button(action: {
+                        locationController.stopSimulation()
+                    }) {
+                        Text("Stop")
+                            .frame(maxWidth: .infinity)
+                    }
+                } else {
+                    Button(action: {
+                        locationController.simulateImportedRoute()
+                    }) {
+                        Text("Start Simulation")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+
+            Text("Switch Points mode to leave the imported route")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            Spacer()
+        }
     }
 }
 

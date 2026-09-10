@@ -6,6 +6,9 @@ Easy to use MacOS 11+ application for mocking iOS device and simulator location 
 
 ## What's New in This Enhanced Version
 
+- **Local JSON API**: Control the same running app from `./simvirtual` (load, configure, start, pause, resume, stop, status) without clicking through the UI. Build with `./build-api.sh`; see [local API and navigation replay](docs/local-control-api.md).
+- **Original Route Replay**: Import a GeoJSON LineString without Apple Maps rerouting. iOS Simulator replay uses `simctl location` to supply simulated speed as well as coordinates.
+- **Apple Directions CLI**: Export full route and step geometry with `./simvirtual apple-directions waypoints.json` for automated route diagnostics.
 - **Enhanced Route Simulation Controls**: Advanced waypoint management with real-time direction tracking
 - **Direction Mode**: Visual heading/bearing display for simulated movement
 - **Route Debug Window**: Visual debugging interface for route simulation

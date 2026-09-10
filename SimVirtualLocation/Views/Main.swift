@@ -36,6 +36,11 @@ struct SimVirtualLocationApp: App {
                 }
                 .keyboardShortcut("i", modifiers: [.command])
 
+                Button("Import Route (GeoJSON)...") {
+                    importRoute()
+                }
+                .keyboardShortcut("r", modifiers: [.command])
+
                 Button("Export Locations...") {
                     exportLocations()
                 }
@@ -81,6 +86,30 @@ struct SimVirtualLocationApp: App {
         }
     }
 
+    private func importRoute() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Route"
+        panel.message = "Select a GeoJSON LineString or Feature with LineString geometry"
+        var routeContentTypes: [UTType] = [.json]
+        if let geoJSONType = UTType(filenameExtension: "geojson") {
+            routeContentTypes.append(geoJSONType)
+        }
+        panel.allowedContentTypes = routeContentTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+
+            do {
+                let data = try Data(contentsOf: url)
+                appState.locationController?.importGeoJSONRoute(from: data)
+            } catch {
+                appState.locationController?.showAlert("Failed to import route: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func exportLocations() {
         guard let controller = appState.locationController,
               !controller.savedLocations.isEmpty else { return }
@@ -111,6 +140,8 @@ struct SimVirtualLocationApp: App {
 class AppState: ObservableObject {
     let mapView: MapView
     @Published var locationController: LocationController?
+    private var controlAPI: ControlAPI?
+    private var terminationObserver: NSObjectProtocol?
 
     init() {
         self.mapView = MapView()
@@ -118,7 +149,20 @@ class AppState: ObservableObject {
 
     func initialize() {
         if locationController == nil {
-            locationController = LocationController(mapView: mapView)
+            let controller = LocationController(mapView: mapView)
+            locationController = controller
+            terminationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+            ) { [weak controller] _ in controller?.prepareForTermination() }
+            let api = ControlAPI(handler: { [weak controller] request in
+                controller?.handleControlRequest(request) ?? ["ok": false, "error": "Controller unavailable"]
+            })
+            do {
+                try api.start()
+                controlAPI = api
+            } catch {
+                NSLog("SimVirtualLocation control API unavailable: %@", error.localizedDescription)
+            }
         }
     }
 
@@ -128,7 +172,7 @@ class AppState: ObservableObject {
 
         // Use NSAlert as a temporary solution until RouteDebugWindow is added to project
         let alert = NSAlert()
-        alert.messageText = "Apple Maps Route Info"
+        alert.messageText = controller.importedRoute == nil ? "Apple Maps Route Info" : "Imported Route Info"
         alert.informativeText = debugData.summary + "\n\nUse menu to copy full details."
         alert.alertStyle = .informational
 

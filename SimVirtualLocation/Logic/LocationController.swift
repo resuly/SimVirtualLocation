@@ -39,7 +39,15 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     @Published var isPaused = false
     @Published var currentSimSpeed: Double = 0.0    // m/s, current simulation speed
     @Published var currentSimCourse: Double = -1.0  // degrees 0-360, -1 = unavailable
-    @Published var speed: Double = 60.0
+    @Published var speed: Double = 60.0 {
+        didSet {
+            if replayDevice != nil, isSimulating, !isPaused {
+                if speed > 0 { startSimulatorReplay() } else { pauseSimulation() }
+            }
+        }
+    }
+    @Published private(set) var replayInjectionStatus = "idle"
+    @Published private(set) var replayError: String?
     @Published var pointsMode: PointsMode = .direction {
         didSet { handlePointsModeChange() }
     }
@@ -108,6 +116,10 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     private let mapView: MapView
     private let runner = Runner()
+    private let simulatorReplay = SimulatorRouteReplay()
+    private var replayDevice: String?
+    private var replayRevision = 0
+    private var lastReplayTick: Date?
     private let currentSimulationAnnotation = MKPointAnnotation()
     private let locationManager = CLLocationManager()
     private let defaults: UserDefaults = UserDefaults.standard
@@ -120,6 +132,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     private var annotations: [MKAnnotation] = []
     private var route: MKRoute?
     private var directionRoutes: [MKRoute] = []  // For Direction mode multi-segment routes
+    private var routeGeneration: UInt = 0
 
     // Store all alternate routes for debugging and future route selection
     private var alternateRoutes: [MKRoute] = []  // For Two Points mode
@@ -133,6 +146,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     @Published var savedLocations: [Location] = []
     @Published var routePresets: [RoutePreset] = []
+    @Published private(set) var importedRoute: GeoJSONRoute?
+
+    private var importedRouteOverlay: MKPolyline?
 
     // MARK: - Init
 
@@ -295,10 +311,16 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     func makeRoute() {
+        guard importedRoute == nil else {
+            showNonFatalAlert("Switch Points mode before creating an Apple Maps route")
+            return
+        }
         guard annotations.count == 2 else {
             showAlert("Route requires two points")
             return
         }
+
+        let generation = beginRouteGeneration()
 
         let startPoint = annotations[0].coordinate
         let endPoint = annotations[1].coordinate
@@ -344,10 +366,15 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         let directions = MKDirections(request: directionRequest)
 
         directions.calculate { (response, error) -> Void in
+            guard self.routeGeneration == generation, self.importedRoute == nil else { return }
             guard let response = response else {
                 if let error = error {
                     self.showAlert(error.localizedDescription)
                 }
+                return
+            }
+            guard !response.routes.isEmpty else {
+                self.showAlert("Apple Maps returned no routes")
                 return
             }
 
@@ -520,12 +547,24 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         isPaused = true
         timer?.invalidate()
         timer = nil
+        if let device = replayDevice {
+            replayRevision += 1
+            simulatorReplay.clear(device: device)
+            replayInjectionStatus = "paused"
+        }
         log("Simulation paused")
     }
 
     func resumeSimulation() {
         guard isSimulating && isPaused else { return }
         isPaused = false
+        lastReplayTick = Date()
+
+        if replayDevice != nil {
+            guard speed > 0 else { isPaused = true; return }
+            startSimulatorReplay()
+            return
+        }
 
         // Restart timer
         timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
@@ -535,6 +574,10 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     func stopSimulation() {
+        replayRevision += 1
+        if let device = replayDevice { simulatorReplay.clear(device: device) }
+        replayDevice = nil
+        replayInjectionStatus = "idle"
         isSimulating = false
         isPaused = false
         currentSimSpeed = 0.0
@@ -548,6 +591,11 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     func reset() {
         resetAll()
+    }
+
+    func prepareForTermination() {
+        timer?.invalidate()
+        if let device = replayDevice { simulatorReplay.shutdown(device: device) }
     }
 
     // MARK: - MKMapViewDelegate
@@ -600,6 +648,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     // Handle waypoint drag events
     func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, didChange newState: MKAnnotationView.DragState, fromOldState oldState: MKAnnotationView.DragState) {
+        guard importedRoute == nil else { return }
         guard let annotation = view.annotation as? MKPointAnnotation else { return }
         guard let index = waypoints.firstIndex(where: { $0 === annotation }) else { return }
 
@@ -832,11 +881,33 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         log("Alert: \(text)")
     }
 
+    private func showNonFatalAlert(_ text: String) {
+        DispatchQueue.main.async {
+            self.alertText = text
+            self.showingAlert = true
+        }
+        log("Alert: \(text)")
+    }
+
     func importLocations(from data: Data) {
         let locations = (try? JSONDecoder().decode([Location].self, from: data)) ?? []
 
         savedLocations.append(contentsOf: locations)
         saveSavedLocations()
+    }
+
+    /// Imports a GeoJSON LineString as the exact replay geometry. Parsing is
+    /// completed before any controller state is changed, so a rejected file
+    /// leaves the current route and simulation untouched.
+    func importGeoJSONRoute(from data: Data) {
+        do {
+            let route = try GeoJSONRouteParser.parse(data: data)
+            activateImportedRoute(route)
+        } catch let error as GeoJSONRouteError {
+            showNonFatalAlert("Failed to import route: " + error.localizedDescription)
+        } catch {
+            showNonFatalAlert("Failed to import route: " + error.localizedDescription)
+        }
     }
     
     func setToCoordinate(latString: String = "", lngString: String = "") {
@@ -912,7 +983,77 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         tracksTimes.removeAll() // Clear previous simulation data
     }
 
+    private func beginRouteGeneration() -> UInt {
+        routeGeneration &+= 1
+        return routeGeneration
+    }
+
+    private func activateImportedRoute(_ route: GeoJSONRoute) {
+        if isSimulating {
+            stopSimulation()
+        }
+
+        clearImportedRouteState()
+        clearRouteStateForImport()
+
+        importedRoute = route
+
+        var coordinates = route.coordinates.map {
+            CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+        }
+        let overlay = MKPolyline(coordinates: &coordinates, count: coordinates.count)
+        importedRouteOverlay = overlay
+        mapView.mkMapView.addOverlay(overlay, level: .aboveRoads)
+
+        if !overlay.boundingMapRect.isNull {
+            let rect = overlay.boundingMapRect.insetBy(dx: -1000, dy: -1000)
+            mapView.mkMapView.setRegion(MKCoordinateRegion(rect), animated: true)
+        }
+
+        let distanceText = String(format: "%.2f", route.distanceMeters / 1000.0)
+        log("Imported route '" + route.displayName + "' (" + String(route.pointCount) + " points, " + distanceText + " km); Apple Maps routing not used")
+    }
+
+    private func clearImportedRouteState() {
+        guard importedRoute != nil else { return }
+
+        if isSimulating {
+            stopSimulation()
+        }
+        if let overlay = importedRouteOverlay {
+            mapView.mkMapView.removeOverlay(overlay)
+        }
+        importedRouteOverlay = nil
+        importedRoute = nil
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+    }
+
+    private func clearRouteStateForImport() {
+        _ = beginRouteGeneration()
+        mapView.mkMapView.removeAnnotations(mapView.mkMapView.annotations)
+        annotations = []
+        waypoints = []
+        mapView.mkMapView.removeOverlays(mapView.mkMapView.overlays)
+        route = nil
+        alternateRoutes = []
+        directionRoutes = []
+    }
+
+    private func makeTracks(from coordinates: [GeoJSONCoordinate]) -> [Track] {
+        guard coordinates.count >= 2 else { return [] }
+
+        return zip(coordinates, coordinates.dropFirst()).map { start, end in
+            let startCoordinate = CLLocationCoordinate2D(latitude: start.latitude, longitude: start.longitude)
+            let endCoordinate = CLLocationCoordinate2D(latitude: end.latitude, longitude: end.longitude)
+            return Track(startPoint: MKMapPoint(startCoordinate), endPoint: MKMapPoint(endCoordinate))
+        }
+    }
+
     private func performMovement() {
+        if importedRoute != nil {
+            performImportedMovement()
+            return
+        }
         guard self.isSimulating, !self.isPaused, self.tracks.count > 0, self.currentTrackIndex < self.tracks.count else {
             if self.isPaused {
                 return // Keep paused state
@@ -1014,6 +1155,14 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func handlePointsModeChange() {
+        _ = beginRouteGeneration()
+
+        // Imported geometry is a separate explicit mode. Switching back to
+        // any existing point mode clears it so normal Apple routing resumes.
+        if importedRoute != nil {
+            clearImportedRouteState()
+        }
+
         // Switching away from Direction mode
         if pointsMode != .direction && !waypoints.isEmpty {
             clearAllWaypoints()
@@ -1065,7 +1214,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func handleSet(point: CGPoint) {
-        guard !isSimulating else { return }
+        guard !isSimulating, importedRoute == nil else { return }
 
         let clickLocation = mapView.mkMapView.convert(point, toCoordinateFrom: mapView.mkMapView)
 
@@ -1077,6 +1226,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func addLocation(coordinate: CLLocationCoordinate2D) {
+        _ = beginRouteGeneration()
+
         if pointsMode == .single {
             mapView.mkMapView.removeAnnotations(annotations)
             annotations = []
@@ -1198,6 +1349,12 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func resetAll() {
+        _ = beginRouteGeneration()
+
+        if importedRoute != nil {
+            clearImportedRouteState()
+        }
+
         mapView.mkMapView.removeAnnotations(mapView.mkMapView.annotations)
         annotations = []
 
@@ -1313,6 +1470,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     func deleteWaypoint(at index: Int) {
         guard index < waypoints.count else { return }
 
+        _ = beginRouteGeneration()
+
         let waypoint = waypoints[index]
         mapView.mkMapView.removeAnnotation(waypoint)
         waypoints.remove(at: index)
@@ -1334,6 +1493,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     func moveWaypoint(from source: IndexSet, to destination: Int) {
+        _ = beginRouteGeneration()
         waypoints.move(fromOffsets: source, toOffset: destination)
 
         // Renumber all waypoints
@@ -1351,6 +1511,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     func clearAllWaypoints() {
+        _ = beginRouteGeneration()
         mapView.mkMapView.removeAnnotations(waypoints)
         waypoints = []
         clearRouteOverlays()
@@ -1358,7 +1519,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func autoGenerateRoute() {
-        guard waypoints.count >= 2 else { return }
+        guard waypoints.count >= 2, importedRoute == nil else { return }
+
+        let generation = beginRouteGeneration()
 
         // Clear existing route overlays
         clearRouteOverlays()
@@ -1395,20 +1558,25 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             directions.calculate { [weak self] response, error in
                 defer { group.leave() }
 
+                guard let self = self,
+                      self.routeGeneration == generation,
+                      self.importedRoute == nil else { return }
+
                 if let route = response?.routes.first {
                     allRoutes[i] = route
                     // Log alternate routes if available
                     if let routeCount = response?.routes.count, routeCount > 1 {
-                        self?.log("Segment \(i+1): \(routeCount) route options available")
+                        self.log("Segment \(i+1): \(routeCount) route options available")
                     }
                 } else if let error = error {
-                    self?.log("Route segment \(i+1)→\(i+2) error: \(error.localizedDescription)")
+                    self.log("Route segment \(i+1)→\(i+2) error: \(error.localizedDescription)")
                 }
             }
         }
 
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
+            guard self.routeGeneration == generation, self.importedRoute == nil else { return }
 
             // Save routes for simulation, filtering out any failed segments
             let orderedRoutes = allRoutes.compactMap { $0 }
@@ -1434,6 +1602,125 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         let overlays = mapView.mkMapView.overlays
         mapView.mkMapView.removeOverlays(overlays)
         directionRoutes = []
+    }
+
+    func simulateImportedRoute() {
+        guard let importedRoute = importedRoute else {
+            showAlert("No imported route loaded")
+            return
+        }
+
+        let importedTracks = makeTracks(from: importedRoute.coordinates)
+        guard !importedTracks.isEmpty else {
+            showAlert("Imported route has no track segments")
+            return
+        }
+
+        if deviceMode == .simulator && deviceType == 0 {
+            guard !selectedSimulator.isEmpty, UUID(uuidString: selectedSimulator) != nil else {
+                showAlert("Select one simulator for original-route replay")
+                return
+            }
+            guard speed > 0 else { showAlert("Set a positive speed, or use Pause to stop moving"); return }
+        }
+
+        tracks = importedTracks
+        invalidateState()
+
+        let startCoord = tracks[0].startPoint.coordinate
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+        currentSimulationAnnotation.coordinate = startCoord
+        currentSimulationAnnotation.title = "Current location"
+        mapView.mkMapView.addAnnotation(currentSimulationAnnotation)
+        if deviceMode == .simulator && deviceType == 0 {
+            replayDevice = selectedSimulator
+            startSimulatorReplay()
+        } else {
+            run(location: startCoord)
+        }
+
+        let region = MKCoordinateRegion(center: startCoord, latitudinalMeters: 1000, longitudinalMeters: 1000)
+        mapView.mkMapView.setRegion(region, animated: true)
+
+        if replayDevice == nil {
+            lastReplayTick = Date()
+            timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] _ in
+                self.performMovement()
+            }
+        }
+
+        log("Started imported route simulation with " + String(importedTracks.count) + " track segments")
+    }
+
+    private func startSimulatorReplay() {
+        guard let device = replayDevice, currentTrackIndex < tracks.count else { return }
+        timer?.invalidate()
+        timer = nil
+        replayRevision += 1
+        let revision = replayRevision
+        replayInjectionStatus = "starting"
+        replayError = nil
+        let start = lastTrackLocation ?? tracks[currentTrackIndex].startPoint.coordinate
+        let coordinates = [start] + tracks[currentTrackIndex...].map { $0.endPoint.coordinate }
+        simulatorReplay.start(device: device, coordinates: coordinates, speedKmh: speed, interval: timeScale) { [weak self] result in
+            guard let self = self, self.replayRevision == revision else { return }
+            switch result {
+            case .success:
+                self.replayInjectionStatus = "active"
+                self.lastReplayTick = Date()
+                let timer = Timer(timeInterval: self.timeScale, repeats: true) { [weak self] _ in self?.performMovement() }
+                RunLoop.main.add(timer, forMode: .common)
+                self.timer = timer
+            case .failure(let error):
+                self.stopSimulation()
+                self.replayError = error.localizedDescription
+                self.replayInjectionStatus = "failed"
+                self.log("Simulator replay failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    var estimatedReplayPosition: [Double]? {
+        guard importedRoute != nil, isSimulating || replayInjectionStatus == "complete" else { return nil }
+        return [currentSimulationAnnotation.coordinate.longitude, currentSimulationAnnotation.coordinate.latitude]
+    }
+
+    /// Consume the whole distance budget across short geometry segments. Stopping
+    /// at every vertex made dense imported tracks run slower than the chosen speed.
+    private func performImportedMovement() {
+        guard isSimulating, !isPaused, currentTrackIndex < tracks.count else { return }
+        let now = Date()
+        let elapsed = max(0, now.timeIntervalSince(lastReplayTick ?? now))
+        lastReplayTick = now
+        var remaining = speed / 3.6 * elapsed
+        let origin = lastTrackLocation ?? tracks[currentTrackIndex].startPoint.coordinate
+        var position = origin
+        while currentTrackIndex < tracks.count {
+            let end = tracks[currentTrackIndex].endPoint.coordinate
+            let distance = CLLocation.distance(from: position, to: end)
+            if distance <= remaining || distance < 0.001 {
+                position = end
+                remaining = max(0, remaining - distance)
+                currentTrackIndex += 1
+            } else {
+                let fraction = remaining / distance
+                position = CLLocationCoordinate2D(
+                    latitude: position.latitude + (end.latitude - position.latitude) * fraction,
+                    longitude: position.longitude + (end.longitude - position.longitude) * fraction)
+                break
+            }
+        }
+        lastTrackLocation = position
+        currentSimulationAnnotation.coordinate = position
+        currentSimSpeed = speed / 3.6
+        currentSimCourse = origin.bearing(to: position)
+        // simctl owns injection for simulator replay; the timer only updates the
+        // observer map. Never send a second location writer over that scenario.
+        if replayDevice == nil { run(location: position, speed: currentSimSpeed, course: currentSimCourse) }
+        if currentTrackIndex == tracks.count {
+            stopSimulation()
+            replayInjectionStatus = "complete"
+        }
     }
 
     func simulateDirectionRoute() {
@@ -1574,6 +1861,10 @@ private extension LocationController {
     // MARK: - Debug Methods
 
     public func getRouteDebugData() -> RouteDebugData {
+        if let importedRoute = importedRoute {
+            return makeImportedRouteDebugData(importedRoute)
+        }
+
         var summary = ""
         var details = ""
         var steps = ""
@@ -1678,6 +1969,50 @@ private extension LocationController {
             polylineData: polyline,
             rawJSON: json,
             fullText: fullText
+        )
+    }
+
+    private func makeImportedRouteDebugData(_ route: GeoJSONRoute) -> RouteDebugData {
+        let summary = """
+        Mode: Imported Route (original geometry)
+        Name: \(route.displayName)
+        Points: \(route.pointCount)
+        Length: \(String(format: "%.2f", route.distanceMeters / 1000.0)) km
+        Source: GeoJSON LineString
+        Apple Maps routing: Not used; coordinates are replayed in file order.
+        """
+
+        let details = """
+        Imported Route
+        Name: \(route.displayName)
+        Coordinate order: [longitude, latitude]
+        Point count: \(route.pointCount)
+        Length: \(String(format: "%.2f", route.distanceMeters / 1000.0)) km (\(String(format: "%.0f", route.distanceMeters)) m)
+        Geometry: original imported coordinates; no MKDirections route was calculated.
+        """
+
+        let polyline = "Total Points: \(route.pointCount)\nOriginal coordinate order preserved: yes\n"
+        let steps = "No Apple navigation steps: this route was imported and was not generated by MKDirections."
+        let escapedName = route.displayName.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let rawJSON = """
+        {
+          "source": "geojson-imported-original-geometry",
+          "name": "\(escapedName)",
+          "pointCount": \(route.pointCount),
+          "distanceMeters": \(route.distanceMeters),
+          "coordinateOrder": "[longitude, latitude]",
+          "appleMapsRoutingUsed": false
+        }
+        """
+
+        return RouteDebugData(
+            summary: summary,
+            routeDetails: details,
+            navigationSteps: steps,
+            polylineData: polyline,
+            rawJSON: rawJSON,
+            fullText: makeImportedRouteDebugInfo(route)
         )
     }
 
@@ -1813,6 +2148,10 @@ private extension LocationController {
     }
 
     public func getRouteDebugInfo() -> String {
+        if let importedRoute = importedRoute {
+            return makeImportedRouteDebugInfo(importedRoute)
+        }
+
         var info = "=== Apple Maps Route Debug Info ===\n\n"
 
         if pointsMode == .direction {
@@ -1843,6 +2182,19 @@ private extension LocationController {
         }
 
         return info
+    }
+
+    private func makeImportedRouteDebugInfo(_ route: GeoJSONRoute) -> String {
+        return """
+        === Imported Route Debug Info ===
+
+        Mode: Imported Route (original geometry)
+        Name: \(route.displayName)
+        Points: \(route.pointCount)
+        Length: \(String(format: "%.2f", route.distanceMeters / 1000.0)) km
+        Source: GeoJSON LineString
+        Apple Maps routing: Not used; coordinates are replayed in file order.
+        """
     }
 
     private func formatRouteDetails(_ route: MKRoute, detailed: Bool) -> String {
