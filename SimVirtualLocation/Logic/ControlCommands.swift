@@ -37,6 +37,9 @@ extension LocationController {
                 guard requestedInterval != nil else { return failure("interval_s must be between 0.5 and 2") }
                 guard !isSimulating else { return failure("Stop simulation before changing the interval") }
             }
+            if importedTimeline != nil && isSimulating && (requestedSpeed != nil || requestedInterval != nil) {
+                return failure("Stop the GPS timeline before changing constant replay settings")
+            }
             // Validate everything before mutating state.
             if let id = requestedSimulator { selectedSimulator = id; deviceMode = .simulator; deviceType = 0 }
             if let value = requestedSpeed { speed = value }
@@ -49,6 +52,14 @@ extension LocationController {
             do { _ = try GeoJSONRouteParser.parse(data: data) }
             catch { return failure(error.localizedDescription) }
             importGeoJSONRoute(from: data)
+        case "load-timeline":
+            guard let object = request["timeline"], JSONSerialization.isValidJSONObject(object),
+                  let data = try? JSONSerialization.data(withJSONObject: object) else {
+                return failure("timeline must be a version 1 gps_samples document")
+            }
+            do { _ = try GPSSamplesTimelineParser.parse(data: data) }
+            catch { return failure(error.localizedDescription) }
+            importGPSSamplesTimeline(from: data)
         case "start":
             guard deviceMode == .simulator, deviceType == 0, !selectedSimulator.isEmpty,
                   bootedSimulators.contains(where: { $0.id == selectedSimulator }) else {
@@ -59,12 +70,28 @@ extension LocationController {
             guard !isSimulating else { return failure("Already running; use resume for a paused replay") }
             simulateImportedRoute()
             guard isSimulating else { return failure("Could not start replay") }
+        case "start-timeline":
+            guard deviceMode == .simulator, deviceType == 0, !selectedSimulator.isEmpty,
+                  bootedSimulators.contains(where: { $0.id == selectedSimulator }) else {
+                return failure("Configure one booted iOS simulator before starting through the API")
+            }
+            guard importedTimeline != nil else { return failure("Load a gps_samples timeline first") }
+            guard !isSimulating else { return failure("Already running; use resume for a paused replay") }
+            simulateGPSSamplesTimeline()
+            guard isSimulating else { return failure("Could not start GPS timeline replay") }
         case "pause":
             guard isSimulating else { return failure("No active replay") }
+            guard !timelineScheduleComplete else { return failure("GPS timeline schedule is already complete; use stop") }
             pauseSimulation()
         case "resume":
             guard isSimulating && isPaused else { return failure("No paused replay") }
-            guard speed > 0 else { return failure("Set a positive speed before resuming") }
+            if importedTimeline != nil, let timeline = importedTimeline,
+               timelineReplayIndex >= timeline.points.count - 1 {
+                return failure("GPS timeline schedule is already complete; use stop")
+            }
+            if importedTimeline == nil {
+                guard speed > 0 else { return failure("Set a positive speed before resuming") }
+            }
             resumeSimulation()
         case "stop": stopSimulation()
         case "route":
@@ -72,9 +99,15 @@ extension LocationController {
             return ["ok": true, "source": "imported_geometry", "name": route.displayName,
                     "point_count": route.pointCount, "distance_m": route.distanceMeters,
                     "coordinates": route.coordinates.map { [$0.longitude, $0.latitude] }]
+        case "timeline":
+            guard let timeline = importedTimeline else { return failure("No GPS timeline imported") }
+            return ["ok": true, "source": "gps_samples", "version": timeline.version,
+                    "name": timeline.displayName, "duration_s": timeline.durationSeconds,
+                    "point_count": timeline.pointCount, "max_gap_s": timeline.maxGapSeconds,
+                    "points": timeline.points.map { timelinePointPayload($0) }]
         case "debug":
             let data = getRouteDebugData()
-            return ["ok": true, "source": importedRoute == nil ? "apple_maps" : "imported_geometry",
+            return ["ok": true, "source": importedTimeline != nil ? "gps_samples" : (importedRoute == nil ? "apple_maps" : "imported_geometry"),
                     "summary": data.summary, "details": data.routeDetails,
                     "steps": data.navigationSteps, "polyline": data.polylineData]
         default: return failure("Unknown command: \(command)")
@@ -84,7 +117,7 @@ extension LocationController {
             "simulator": selectedSimulator, "speed_kmh": speed, "interval_s": timeScale,
             "requested_speed_mps": currentSimSpeed, "requested_course_deg": currentSimCourse,
             "injection_status": replayInjectionStatus,
-            "source": importedRoute == nil ? "apple_maps" : "imported_geometry"
+            "source": importedTimeline != nil ? "gps_samples" : (importedRoute == nil ? "apple_maps" : "imported_geometry")
         ]
         if let error = replayError { state["injection_error"] = error }
         if let position = estimatedReplayPosition { state["estimated_position"] = position }
@@ -92,6 +125,49 @@ extension LocationController {
             state["route"] = ["name": route.displayName, "point_count": route.pointCount,
                               "distance_m": route.distanceMeters]
         }
+        if let timeline = importedTimeline {
+            state["timeline"] = ["name": timeline.displayName, "version": timeline.version,
+                                  "point_count": timeline.pointCount,
+                                  "duration_s": timeline.durationSeconds,
+                                  "max_gap_s": timeline.maxGapSeconds]
+            state["timeline_status"] = timelineReplayStatus
+            state["timeline_index"] = timelineReplayIndex
+            state["timeline_elapsed_s"] = timelineElapsedSeconds
+            state["timeline_schedule_complete"] = timelineScheduleComplete
+            state["timeline_injection_speed_source"] = timelineInjectionSpeedSource
+            state["timeline_injection_speed_mode"] = timelineGapActive || timelineInjectionSpeedSource == "gap_unknown"
+                ? "gap_unknown"
+                : ((timelineInjectionSpeedSource == "stationary_unknown" || timelineInjectionSpeedSource == "gap_endpoint")
+                    ? "stationary_unknown"
+                    : (timelineUsedRecordedSpeed && timelineUsedGeometrySpeed
+                    ? "mixed"
+                    : (timelineUsedGeometrySpeed ? "geometry_derived" : (timelineUsedRecordedSpeed ? "recorded_speed_mps" : "none"))))
+            state["timeline_injection_course_supported"] = false
+            state["timeline_injection_accuracy_supported"] = false
+            state["timeline_gap_active"] = timelineGapActive
+            state["timeline_gap_status"] = timelineGapActive
+                ? "unknown"
+                : (timelineReplayStatus == "paused" && timelineGapStartIndex != nil ? "paused" : "none")
+            if let index = timelineGapStartIndex { state["timeline_gap_start_index"] = index }
+            if let index = timelineGapEndIndex { state["timeline_gap_end_index"] = index }
+            if let duration = timelineGapDurationSeconds { state["timeline_gap_duration_s"] = duration }
+            if let speed = timelineInjectionSpeedMps { state["timeline_injection_speed_mps"] = speed }
+            if let speed = timelineRecordedSpeedMps { state["timeline_recorded_speed_mps"] = speed }
+            if let accuracy = timelineRecordedAccuracyM { state["timeline_recorded_horizontal_accuracy_m"] = accuracy }
+            if let course = timelineRecordedCourseDeg { state["timeline_recorded_course_deg"] = course }
+        }
         return state
+    }
+
+    private func timelinePointPayload(_ point: GPSSample) -> [String: Any] {
+        var payload: [String: Any] = [
+            "elapsed_s": point.elapsedSeconds,
+            "latitude": point.latitude,
+            "longitude": point.longitude,
+        ]
+        payload["speed_mps"] = point.speedMps.map { $0 as Any } ?? NSNull()
+        payload["horizontal_accuracy_m"] = point.horizontalAccuracyMeters.map { $0 as Any } ?? NSNull()
+        payload["course_deg"] = point.courseDegrees.map { $0 as Any } ?? NSNull()
+        return payload
     }
 }

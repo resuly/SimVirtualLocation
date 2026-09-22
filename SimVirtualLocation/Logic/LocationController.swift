@@ -37,7 +37,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     @Published var isSimulating = false
     @Published var isPaused = false
-    @Published var currentSimSpeed: Double = 0.0    // m/s, current simulation speed
+    @Published var currentSimSpeed: Double = 0.0    // m/s, -1 = unavailable
     @Published var currentSimCourse: Double = -1.0  // degrees 0-360, -1 = unavailable
     @Published var speed: Double = 60.0 {
         didSet {
@@ -147,8 +147,27 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     @Published var savedLocations: [Location] = []
     @Published var routePresets: [RoutePreset] = []
     @Published private(set) var importedRoute: GeoJSONRoute?
+    @Published private(set) var importedTimeline: GPSSamplesTimeline?
+    @Published private(set) var timelineReplayStatus = "idle"
+    @Published private(set) var timelineReplayIndex = 0
+    @Published private(set) var timelineElapsedSeconds = 0.0
+    @Published private(set) var timelineInjectionSpeedSource = "none"
+    @Published private(set) var timelineInjectionSpeedMps: Double?
+    @Published private(set) var timelineUsedRecordedSpeed = false
+    @Published private(set) var timelineUsedGeometrySpeed = false
+    @Published private(set) var timelineRecordedSpeedMps: Double?
+    @Published private(set) var timelineRecordedAccuracyM: Double?
+    @Published private(set) var timelineRecordedCourseDeg: Double?
+    @Published private(set) var timelineScheduleComplete = false
+    @Published private(set) var timelineGapActive = false
+    @Published private(set) var timelineGapStartIndex: Int?
+    @Published private(set) var timelineGapEndIndex: Int?
+    @Published private(set) var timelineGapDurationSeconds: Double?
 
     private var importedRouteOverlay: MKPolyline?
+    private var timelineReplayDevice: String?
+    private var timelineReplayRevision = 0
+    private var timelineReplayBaseIndex = 0
 
     // MARK: - Init
 
@@ -311,7 +330,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     func makeRoute() {
-        guard importedRoute == nil else {
+        guard importedRoute == nil, importedTimeline == nil else {
             showNonFatalAlert("Switch Points mode before creating an Apple Maps route")
             return
         }
@@ -366,7 +385,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         let directions = MKDirections(request: directionRequest)
 
         directions.calculate { (response, error) -> Void in
-            guard self.routeGeneration == generation, self.importedRoute == nil else { return }
+            guard self.routeGeneration == generation, self.importedRoute == nil, self.importedTimeline == nil else { return }
             guard let response = response else {
                 if let error = error {
                     self.showAlert(error.localizedDescription)
@@ -552,6 +571,14 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             simulatorReplay.clear(device: device)
             replayInjectionStatus = "paused"
         }
+        if let device = timelineReplayDevice {
+            timelineReplayRevision += 1
+            simulatorReplay.clear(device: device)
+            replayInjectionStatus = "paused"
+            timelineReplayStatus = "paused"
+            timelineScheduleComplete = false
+            timelineGapActive = false
+        }
         log("Simulation paused")
     }
 
@@ -566,6 +593,11 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             return
         }
 
+        if timelineReplayDevice != nil {
+            startGPSSamplesTimeline(from: timelineReplayIndex)
+            return
+        }
+
         // Restart timer
         timer = Timer.scheduledTimer(withTimeInterval: timeScale, repeats: true) { [unowned self] timer in
             self.performMovement()
@@ -577,6 +609,25 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         replayRevision += 1
         if let device = replayDevice { simulatorReplay.clear(device: device) }
         replayDevice = nil
+        timelineReplayRevision += 1
+        if let device = timelineReplayDevice { simulatorReplay.clear(device: device) }
+        timelineReplayDevice = nil
+        timelineReplayBaseIndex = 0
+        timelineReplayIndex = 0
+        timelineElapsedSeconds = 0
+        timelineInjectionSpeedSource = "none"
+        timelineInjectionSpeedMps = nil
+        timelineUsedRecordedSpeed = false
+        timelineUsedGeometrySpeed = false
+        timelineRecordedSpeedMps = nil
+        timelineRecordedAccuracyM = nil
+        timelineRecordedCourseDeg = nil
+        timelineScheduleComplete = false
+        timelineGapActive = false
+        timelineGapStartIndex = nil
+        timelineGapEndIndex = nil
+        timelineGapDurationSeconds = nil
+        timelineReplayStatus = "idle"
         replayInjectionStatus = "idle"
         isSimulating = false
         isPaused = false
@@ -596,6 +647,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     func prepareForTermination() {
         timer?.invalidate()
         if let device = replayDevice { simulatorReplay.shutdown(device: device) }
+        if let device = timelineReplayDevice { simulatorReplay.shutdown(device: device) }
     }
 
     // MARK: - MKMapViewDelegate
@@ -648,7 +700,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
     // Handle waypoint drag events
     func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, didChange newState: MKAnnotationView.DragState, fromOldState oldState: MKAnnotationView.DragState) {
-        guard importedRoute == nil else { return }
+        guard importedRoute == nil, importedTimeline == nil else { return }
         guard let annotation = view.annotation as? MKPointAnnotation else { return }
         guard let index = waypoints.firstIndex(where: { $0 === annotation }) else { return }
 
@@ -909,6 +961,18 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             showNonFatalAlert("Failed to import route: " + error.localizedDescription)
         }
     }
+
+    /// Imports a versioned historical GPS timeline. Parsing is completed before
+    /// changing controller state so a rejected recording leaves the active
+    /// route and replay untouched.
+    func importGPSSamplesTimeline(from data: Data) {
+        do {
+            let timeline = try GPSSamplesTimelineParser.parse(data: data)
+            activateGPSSamplesTimeline(timeline)
+        } catch {
+            showNonFatalAlert("Failed to import GPS timeline: " + error.localizedDescription)
+        }
+    }
     
     func setToCoordinate(latString: String = "", lngString: String = "") {
         var lat: Double = 0
@@ -993,6 +1057,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
             stopSimulation()
         }
 
+        clearImportedTimelineState()
         clearImportedRouteState()
         clearRouteStateForImport()
 
@@ -1014,6 +1079,49 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         log("Imported route '" + route.displayName + "' (" + String(route.pointCount) + " points, " + distanceText + " km); Apple Maps routing not used")
     }
 
+    private func activateGPSSamplesTimeline(_ timeline: GPSSamplesTimeline) {
+        if isSimulating {
+            stopSimulation()
+        }
+
+        clearImportedTimelineState()
+        clearImportedRouteState()
+        clearRouteStateForImport()
+
+        importedTimeline = timeline
+        timelineReplayStatus = "idle"
+        timelineReplayIndex = 0
+        timelineElapsedSeconds = 0
+        timelineInjectionSpeedSource = "none"
+        timelineInjectionSpeedMps = nil
+        timelineUsedRecordedSpeed = false
+        timelineUsedGeometrySpeed = false
+        timelineRecordedSpeedMps = nil
+        timelineRecordedAccuracyM = timeline.points.first?.horizontalAccuracyMeters
+        timelineRecordedCourseDeg = timeline.points.first?.courseDegrees
+        timelineScheduleComplete = false
+        timelineGapActive = false
+        timelineGapStartIndex = nil
+        timelineGapEndIndex = nil
+        timelineGapDurationSeconds = nil
+        currentSimSpeed = 0.0
+        currentSimCourse = -1.0
+
+        var coordinates = timeline.points.map { $0.coordinate }
+        let overlay = MKPolyline(coordinates: &coordinates, count: coordinates.count)
+        importedRouteOverlay = overlay
+        mapView.mkMapView.addOverlay(overlay, level: .aboveRoads)
+        if !overlay.boundingMapRect.isNull {
+            let rect = overlay.boundingMapRect.insetBy(dx: -1000, dy: -1000)
+            mapView.mkMapView.setRegion(MKCoordinateRegion(rect), animated: true)
+        }
+
+        log("Imported GPS timeline '" + timeline.displayName + "' (" +
+            String(timeline.pointCount) + " points, " +
+            String(format: "%.2f", timeline.durationSeconds) + " s); " +
+            "simctl course/accuracy injection is unavailable")
+    }
+
     private func clearImportedRouteState() {
         guard importedRoute != nil else { return }
 
@@ -1025,6 +1133,36 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         }
         importedRouteOverlay = nil
         importedRoute = nil
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+    }
+
+    private func clearImportedTimelineState() {
+        guard importedTimeline != nil else { return }
+
+        if isSimulating {
+            stopSimulation()
+        }
+        if let overlay = importedRouteOverlay {
+            mapView.mkMapView.removeOverlay(overlay)
+        }
+        importedRouteOverlay = nil
+        importedTimeline = nil
+        timelineReplayDevice = nil
+        timelineReplayStatus = "idle"
+        timelineReplayIndex = 0
+        timelineElapsedSeconds = 0
+        timelineInjectionSpeedSource = "none"
+        timelineInjectionSpeedMps = nil
+        timelineUsedRecordedSpeed = false
+        timelineUsedGeometrySpeed = false
+        timelineRecordedSpeedMps = nil
+        timelineRecordedAccuracyM = nil
+        timelineRecordedCourseDeg = nil
+        timelineScheduleComplete = false
+        timelineGapActive = false
+        timelineGapStartIndex = nil
+        timelineGapEndIndex = nil
+        timelineGapDurationSeconds = nil
         mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
     }
 
@@ -1162,6 +1300,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         if importedRoute != nil {
             clearImportedRouteState()
         }
+        if importedTimeline != nil {
+            clearImportedTimelineState()
+        }
 
         // Switching away from Direction mode
         if pointsMode != .direction && !waypoints.isEmpty {
@@ -1214,7 +1355,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func handleSet(point: CGPoint) {
-        guard !isSimulating, importedRoute == nil else { return }
+        guard !isSimulating, importedRoute == nil, importedTimeline == nil else { return }
 
         let clickLocation = mapView.mkMapView.convert(point, toCoordinateFrom: mapView.mkMapView)
 
@@ -1353,6 +1494,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
         if importedRoute != nil {
             clearImportedRouteState()
+        }
+        if importedTimeline != nil {
+            clearImportedTimelineState()
         }
 
         mapView.mkMapView.removeAnnotations(mapView.mkMapView.annotations)
@@ -1519,7 +1663,7 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     private func autoGenerateRoute() {
-        guard waypoints.count >= 2, importedRoute == nil else { return }
+        guard waypoints.count >= 2, importedRoute == nil, importedTimeline == nil else { return }
 
         let generation = beginRouteGeneration()
 
@@ -1560,7 +1704,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
                 guard let self = self,
                       self.routeGeneration == generation,
-                      self.importedRoute == nil else { return }
+                      self.importedRoute == nil,
+                      self.importedTimeline == nil else { return }
 
                 if let route = response?.routes.first {
                     allRoutes[i] = route
@@ -1576,7 +1721,9 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
 
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
-            guard self.routeGeneration == generation, self.importedRoute == nil else { return }
+            guard self.routeGeneration == generation,
+                  self.importedRoute == nil,
+                  self.importedTimeline == nil else { return }
 
             // A partial route would silently skip waypoints during simulation.
             let missingSegments = allRoutes.indices.filter { allRoutes[$0] == nil }
@@ -1661,6 +1808,154 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
         log("Started imported route simulation with " + String(importedTracks.count) + " track segments")
     }
 
+    func simulateGPSSamplesTimeline() {
+        guard let timeline = importedTimeline else {
+            showAlert("No GPS timeline loaded")
+            return
+        }
+        guard timeline.points.count >= 2 else {
+            showAlert("GPS timeline has no replayable segments")
+            return
+        }
+        guard deviceMode == .simulator && deviceType == 0 else {
+            showAlert("Historical GPS timeline replay currently requires an iOS simulator")
+            return
+        }
+        guard !selectedSimulator.isEmpty,
+              UUID(uuidString: selectedSimulator) != nil else {
+            showAlert("Select one simulator for GPS timeline replay")
+            return
+        }
+
+        timelineReplayBaseIndex = 0
+        timelineReplayIndex = 0
+        timelineElapsedSeconds = 0
+        currentSimSpeed = -1.0
+        currentSimCourse = -1.0
+        let start = timeline.points[0].coordinate
+        mapView.mkMapView.removeAnnotation(currentSimulationAnnotation)
+        currentSimulationAnnotation.coordinate = start
+        currentSimulationAnnotation.title = "Current location (estimated)"
+        mapView.mkMapView.addAnnotation(currentSimulationAnnotation)
+        startGPSSamplesTimeline(from: 0)
+
+        let region = MKCoordinateRegion(center: start, latitudinalMeters: 1000, longitudinalMeters: 1000)
+        mapView.mkMapView.setRegion(region, animated: true)
+        log("Started GPS timeline replay with " + String(timeline.points.count) + " samples")
+    }
+
+    private func startGPSSamplesTimeline(from pointIndex: Int) {
+        guard let timeline = importedTimeline,
+              pointIndex >= 0,
+              pointIndex < timeline.points.count - 1 else {
+            return
+        }
+
+        let baseElapsed = timeline.points[pointIndex].elapsedSeconds
+        let points = timeline.points[pointIndex...].map { point in
+            GPSSample(
+                elapsedSeconds: point.elapsedSeconds - baseElapsed,
+                latitude: point.latitude,
+                longitude: point.longitude,
+                speedMps: point.speedMps,
+                horizontalAccuracyMeters: point.horizontalAccuracyMeters,
+                courseDegrees: point.courseDegrees
+            )
+        }
+
+        timelineReplayBaseIndex = pointIndex
+        timelineReplayRevision += 1
+        let revision = timelineReplayRevision
+        timelineReplayDevice = selectedSimulator
+        timelineReplayStatus = "starting"
+        timelineScheduleComplete = false
+        timelineGapActive = false
+        timelineGapStartIndex = nil
+        timelineGapEndIndex = nil
+        timelineGapDurationSeconds = nil
+        replayInjectionStatus = "starting"
+        replayError = nil
+        isSimulating = true
+        isPaused = false
+
+        simulatorReplay.startTimeline(
+            device: selectedSimulator,
+            points: points,
+            maxGapSeconds: timeline.maxGapSeconds,
+            progress: { [weak self] localIndex, coordinate, elapsed, speedMps, speedSource in
+                guard let self, self.timelineReplayRevision == revision,
+                      self.timelineReplayDevice != nil,
+                      let timeline = self.importedTimeline else { return }
+                let globalIndex = min(self.timelineReplayBaseIndex + localIndex, timeline.points.count - 1)
+                self.timelineReplayIndex = globalIndex
+                self.timelineElapsedSeconds = baseElapsed + elapsed
+                self.timelineInjectionSpeedSource = speedSource
+                self.timelineInjectionSpeedMps = speedMps
+                if speedSource == "recorded_speed_mps" {
+                    self.timelineUsedRecordedSpeed = true
+                } else if speedSource == "geometry_derived" {
+                    self.timelineUsedGeometrySpeed = true
+                }
+                self.timelineRecordedSpeedMps = timeline.points[globalIndex].speedMps
+                self.timelineRecordedAccuracyM = timeline.points[globalIndex].horizontalAccuracyMeters
+                self.timelineRecordedCourseDeg = timeline.points[globalIndex].courseDegrees
+                if speedSource == "gap_unknown" {
+                    self.timelineGapActive = true
+                    self.timelineGapStartIndex = globalIndex
+                    self.timelineGapEndIndex = min(globalIndex + 1, timeline.points.count - 1)
+                    self.timelineGapDurationSeconds = timeline.points[globalIndex + 1].elapsedSeconds - timeline.points[globalIndex].elapsedSeconds
+                    self.timelineReplayStatus = "gap"
+                    self.replayInjectionStatus = "gap"
+                } else if speedSource == "gap_endpoint" {
+                    self.timelineGapActive = false
+                    self.timelineGapStartIndex = nil
+                    self.timelineGapEndIndex = nil
+                    self.timelineGapDurationSeconds = nil
+                    self.timelineReplayStatus = "active"
+                    self.replayInjectionStatus = "active"
+                } else if self.timelineReplayStatus == "starting" {
+                    self.timelineReplayStatus = "active"
+                    self.replayInjectionStatus = "active"
+                }
+                self.currentSimSpeed = speedMps ?? -1.0
+                // simctl does not accept a course parameter. Keep this field
+                // unavailable instead of reporting the recorded value as injected.
+                self.currentSimCourse = -1
+                self.currentSimulationAnnotation.coordinate = coordinate
+                if !self.mapView.mkMapView.annotations.contains(where: { $0 === self.currentSimulationAnnotation }) {
+                    self.mapView.mkMapView.addAnnotation(self.currentSimulationAnnotation)
+                }
+            },
+            completion: { [weak self] result in
+                guard let self, self.timelineReplayRevision == revision else { return }
+                switch result {
+                case .success:
+                    self.timelineReplayStatus = "schedule_complete"
+                    self.replayInjectionStatus = "schedule_complete"
+                    self.timelineScheduleComplete = true
+                    self.log("GPS timeline schedule reached its final sample; simulator injection remains active until stopped")
+                case .failure(let error):
+                    let device = self.timelineReplayDevice
+                    self.timelineReplayDevice = nil
+                    self.isSimulating = false
+                    self.isPaused = false
+                    self.timer?.invalidate()
+                    self.timer = nil
+                    if let device { self.simulatorReplay.clear(device: device) }
+                    self.timelineReplayStatus = "failed"
+                    self.replayInjectionStatus = "failed"
+                    self.replayError = error.localizedDescription
+                    self.timelineScheduleComplete = false
+                    self.timelineGapActive = false
+                    self.timelineGapStartIndex = nil
+                    self.timelineGapEndIndex = nil
+                    self.timelineGapDurationSeconds = nil
+                    self.log("GPS timeline replay failed: " + error.localizedDescription)
+                }
+            }
+        )
+    }
+
     private func startSimulatorReplay() {
         guard let device = replayDevice, currentTrackIndex < tracks.count else { return }
         timer?.invalidate()
@@ -1690,7 +1985,8 @@ class LocationController: NSObject, ObservableObject, MKMapViewDelegate, CLLocat
     }
 
     var estimatedReplayPosition: [Double]? {
-        guard importedRoute != nil, isSimulating || replayInjectionStatus == "complete" else { return nil }
+        guard importedRoute != nil || importedTimeline != nil,
+              isSimulating || replayInjectionStatus == "complete" || replayInjectionStatus == "schedule_complete" else { return nil }
         return [currentSimulationAnnotation.coordinate.longitude, currentSimulationAnnotation.coordinate.latitude]
     }
 

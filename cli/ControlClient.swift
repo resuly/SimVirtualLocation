@@ -17,7 +17,7 @@ struct ControlClient {
     private static let maxRequestBytes = 8 * 1024 * 1024
     private static let ioTimeout: TimeInterval = 5.0
     private static let commandNames: Set<String> = [
-        "status", "simulators", "start", "pause", "resume", "stop", "route", "debug"
+        "status", "simulators", "start", "start-timeline", "pause", "resume", "stop", "route", "timeline", "debug"
     ]
 
     static func run() {
@@ -87,6 +87,18 @@ struct ControlClient {
                 }
                 let route = try parseJSONObject(routeData, context: "route file")
                 request = ["command": "load-route", "route": route]
+            case "load-timeline":
+                guard remaining.count == 2 else {
+                    throw ClientError(code: "usage", message: "load-timeline requires one gps_samples JSON file path")
+                }
+                let timelineData: Data
+                if remaining[1] == "-" {
+                    timelineData = try readStdin(maxBytes: maxRequestBytes)
+                } else {
+                    timelineData = try readFile(remaining[1], maxBytes: maxRequestBytes)
+                }
+                let timeline = try parseJSONObject(timelineData, context: "timeline file")
+                request = ["command": "load-timeline", "timeline": timeline]
             case "configure":
                 guard remaining.count == 2 else {
                     throw ClientError(code: "usage", message: "configure requires one JSON object")

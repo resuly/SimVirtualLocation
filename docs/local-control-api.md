@@ -53,6 +53,50 @@ Apple 输出是该组途经点的地图规划对照，不是 AuDrive 已审核�
 
 GUI 的途经点规划也要求每一段都成功；任一段失败会提示对应段号，并阻止启动残缺路线。调整途经点后可重新规划。
 
+## 历史 GPS 时间轴
+
+历史录制使用独立的 `gps_samples` JSON，不改变 `load-route` 的恒速 GeoJSON 行为：
+
+```json
+{
+  "version": 1,
+  "max_gap_s": 10,
+  "points": [
+    {
+      "elapsed_s": 0,
+      "latitude": 0.0,
+      "longitude": 0.0,
+      "speed_mps": 0.0,
+      "horizontal_accuracy_m": 5.0,
+      "course_deg": -1
+    },
+    {
+      "elapsed_s": 2,
+      "latitude": 0.00009,
+      "longitude": 0.0,
+      "speed_mps": 5.0,
+      "horizontal_accuracy_m": 5.0,
+      "course_deg": 0.0
+    }
+  ]
+}
+```
+
+每个点的 `elapsed_s` 是从回放起点开始的相对秒数，必须从 0 开始严格递增；至少两个点，最多 100,000 点，整个请求仍受 8 MiB 限制。`speed_mps`、`horizontal_accuracy_m`、`course_deg` 会原样保留，缺失或 `-1` 可表示录制端没有有效读数。`max_gap_s` 可选，默认 10 秒；`source` 等额外字段会被忽略，不参与注入。
+
+```sh
+./simvirtual load-timeline gps-samples.json
+./simvirtual start-timeline
+./simvirtual status
+./simvirtual timeline > original-gps-samples.json
+```
+
+时间轴回放逐段调用真实的 `xcrun simctl location`：移动段通过 stdin 传坐标，避免负纬度被命令行解析成选项；优先使用录制 `speed_mps`，但只有它与该段距离/时间相差不超过 10% 时才会采用，否则为保证时间轴到达下一个原始点，使用几何估速。静止段使用 `simctl location set` 保持坐标到下一个时间点，但 `set` 后设备速度可能为 `nil`，因此状态源为 `stationary_unknown`，不会把录制的 0 m/s 宣称为设备已注入。`status` 的 `timeline_injection_speed_mode` 会报告 `recorded_speed_mps`、`geometry_derived`、`mixed`、`stationary_unknown` 或 `gap_unknown`，同时保留 `timeline_recorded_speed_mps` 供对照。
+
+如果相邻点间隔超过 `max_gap_s`，调度器会在已知起点清除 simctl 场景，保持原始时间等待，不把未知区间默默插值成慢速行驶；到下一个已知点时重新 `set` 坐标。此时 `timeline_status=gap`、`timeline_gap_status=unknown`，速度不可知；可将 `max_gap_s` 显式调大才允许该区间按普通段回放。当前 `simctl location` 没有时间戳、course 或 accuracy 参数，因此 `horizontal_accuracy_m`、`course_deg` 只用于原始数据回读和对照，不会伪装成已注入的设备字段。`timeline_schedule_complete` 只表示调度器发出了最后一段命令并走完了源时间轴，不是模拟器或目标 App 的完成回执；仍需在目标 App 读取 Core Location 并显式调用 `stop` 清理。
+
+`pause` 会清除当前 simctl 场景；`resume` 从最后一个已调度时间点重新开始，暂停在一个移动段中间时会从该段起点近似恢复。每段重启 simctl 可能产生启动延迟或覆盖前一段尚未完成的移动，状态中的 `estimated_position` 仍只是 Mac 观察标记，不能作为设备端时序或终点完成证据。
+
 ## 直接 JSON 调用
 
 ```sh
@@ -60,7 +104,7 @@ printf '%s\n' '{"command":"status"}' | ./simvirtual -
 ./simvirtual '{"command":"configure","speed_kmh":36}'
 ```
 
-底层是 `~/.simvirtuallocation/control.sock` 的 Unix domain socket，一连接一行 JSON、一行响应。仅当前用户可访问：目录 0700、socket 0600，无 TCP 监听。结构化请求包含 `command`，支持 `status / simulators / configure / load-route / start / pause / resume / stop / route / debug`。这层接口后续可包装成 MCP，无需重新实现路线和状态逻辑。
+底层是 `~/.simvirtuallocation/control.sock` 的 Unix domain socket，一连接一行 JSON、一行响应。仅当前用户可访问：目录 0700、socket 0600，无 TCP 监听。结构化请求包含 `command`，支持 `status / simulators / configure / load-route / load-timeline / start / start-timeline / pause / resume / stop / route / timeline / debug`。这层接口后续可包装成 MCP，无需重新实现路线和状态逻辑。
 
 ## 本轮验收
 
@@ -73,3 +117,19 @@ printf '%s\n' '{"command":"status"}' | ./simvirtual -
 - Apple GUI 缺段保护通过 30 项实际源码行为检查，覆盖首段、中段、末段失败、完整路线、成功重试与过期回调；分别移除发布和启动保护后，检查均能捕获行为错误。Mac Debug 重新构建通过。
 
 道路实测、物理手机的定位注入以及商店发布不包含在这些模拟器证据中。
+
+## 2026-09-22 时间轴回归与边界
+
+- 合成回归覆盖移动点通过 stdin 传入、负纬度 set 参数、长缺口默认 clear、静止段速度未知；不操作模拟器即可运行：
+
+```bash
+xcrun swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+  SimVirtualLocation/Models/GeoJSONRoute.swift \
+  SimVirtualLocation/Logic/SimulatorRouteReplay.swift \
+  Tests/TimelineReplayRegression.swift -o /tmp/simvirtual-timeline-check
+/tmp/simvirtual-timeline-check
+```
+
+- AuDrive 的历史样本实际运行 590 点/1150 秒，App 独立报告完成。原始 speed 与 geometry/time 有冲突，因此只按 status 标明来源，不声称传感器速度完全保真。15 个长缺口按未知区间处理。
+- 完整历史 watcher 初期 3 次工具状态读取失败，后续短回归与冷启动均未复现；仍保留整轮失败状态，根因未确证。Debug 新增私有 control-timing.jsonl，只记阶段/命令/耗时，不含坐标或 token，用来定位延迟，不擅自扩大超时。
+- 调度结束不是 App 到达，Mac estimated_position 不是手机定位回执。上述证据来自 iOS 模拟器，不包含物理手机注入或实车导航。

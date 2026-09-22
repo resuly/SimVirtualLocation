@@ -366,13 +366,15 @@ public final class ControlAPI {
                     if isRunningNow() { stop() }
                     return
                 }
-                handle(clientFD: client)
+                handle(clientFD: client, acceptedAt: Date())
             }
         }
     }
 
-    private func handle(clientFD: Int32) {
+    private func handle(clientFD: Int32, acceptedAt: Date) {
         defer { _ = Darwin.shutdown(clientFD, SHUT_RDWR); _ = Darwin.close(clientFD) }
+        ControlTimingTrace.record(event: "accept", command: "<pending>", at: acceptedAt)
+        var command = "<unknown>"
         do {
             try setNoSIGPIPE(clientFD)
             try setSocketTimeout(clientFD, seconds: ControlAPI.ioTimeout)
@@ -383,12 +385,41 @@ public final class ControlAPI {
 
         do {
             let request = try readRequest(from: clientFD)
+            command = ControlTimingTrace.commandName(from: request)
+            ControlTimingTrace.record(
+                event: "request_received",
+                command: command,
+                elapsed: Date().timeIntervalSince(acceptedAt)
+            )
             let response = makeResponse(for: request)
+            let responseStartedAt = Date()
+            ControlTimingTrace.record(event: "response_write_start", command: command, at: responseStartedAt)
             _ = sendResponse(response, on: clientFD)
+            ControlTimingTrace.record(
+                event: "response_write_end",
+                command: command,
+                elapsed: Date().timeIntervalSince(responseStartedAt)
+            )
         } catch let error as RequestError {
+            ControlTimingTrace.record(event: "request_error", command: command)
+            let responseStartedAt = Date()
+            ControlTimingTrace.record(event: "response_write_start", command: command, at: responseStartedAt)
             _ = sendResponse(["ok": false, "error": errorObject(code: error.code, message: error.message)], on: clientFD)
+            ControlTimingTrace.record(
+                event: "response_write_end",
+                command: command,
+                elapsed: Date().timeIntervalSince(responseStartedAt)
+            )
         } catch {
+            ControlTimingTrace.record(event: "request_error", command: command)
+            let responseStartedAt = Date()
+            ControlTimingTrace.record(event: "response_write_start", command: command, at: responseStartedAt)
             _ = sendResponse(["ok": false, "error": errorObject(code: "internal_error", message: errorMessage(error))], on: clientFD)
+            ControlTimingTrace.record(
+                event: "response_write_end",
+                command: command,
+                elapsed: Date().timeIntervalSince(responseStartedAt)
+            )
         }
     }
 
@@ -452,7 +483,10 @@ public final class ControlAPI {
 
     private func makeResponse(for request: [String: Any]) -> [String: Any] {
         var response: [String: Any]
-        response = invokeHandlerOnMain(request)
+        let command = ControlTimingTrace.commandName(from: request)
+        ControlTimingTrace.record(event: "handler_start", command: command)
+        response = invokeHandlerOnMain(request, command: command)
+        ControlTimingTrace.record(event: "handler_end", command: command)
         if let existingOK = response["ok"] {
             guard existingOK is Bool else {
                 return ["ok": false, "error": errorObject(code: "invalid_response", message: "handler ok field must be boolean")]
@@ -466,13 +500,24 @@ public final class ControlAPI {
         return response
     }
 
-    private func invokeHandlerOnMain(_ request: [String: Any]) -> [String: Any] {
+    private func invokeHandlerOnMain(_ request: [String: Any], command: String) -> [String: Any] {
         if Thread.isMainThread {
-            return handler(request)
+            ControlTimingTrace.record(event: "main_direct_start", command: command)
+            let response = handler(request)
+            ControlTimingTrace.record(event: "main_direct_end", command: command)
+            return response
         }
-        return DispatchQueue.main.sync {
+        let startedAt = Date()
+        ControlTimingTrace.record(event: "main_sync_start", command: command, at: startedAt)
+        let response = DispatchQueue.main.sync {
             handler(request)
         }
+        ControlTimingTrace.record(
+            event: "main_sync_end",
+            command: command,
+            elapsed: Date().timeIntervalSince(startedAt)
+        )
+        return response
     }
 
     @discardableResult
