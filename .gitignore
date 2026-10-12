@@ -2,3 +2,5 @@ SimVirtualLocation.xcodeproj/xcuserdata
 DerivedData
 build
 CLAUDE.md
+.DS_Store
+*.dmg
